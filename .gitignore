@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+
+# VSCode
+.vscode/
+
+# Data（彻底忽略）
+data/cache/*
+data/raw/*
+data/processed/*
+
+# 保留目录结构
+!data/cache/.gitkeep
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# Logs
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
