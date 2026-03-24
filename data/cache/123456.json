@@ -1,0 +1,20 @@
+{
+  "mid": 123456,
+  "name": "test",
+  "videos": [
+    {
+      "bvid": "BV1",
+      "title": "视频1",
+      "pubdate": "2023-11-15T06:13:20",
+      "pubdate_week": "2023-W46",
+      "stats": {
+        "view": 1000,
+        "like": 0,
+        "coin": 0,
+        "collect": 0,
+        "danmaku": 0
+      }
+    }
+  ],
+  "followers_history": []
+}
