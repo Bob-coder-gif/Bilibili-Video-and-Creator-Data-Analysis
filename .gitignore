@@ -1,4 +1,4 @@
-<<<<<<< HEAD
+
 # Python
 __pycache__/
 *.pyc
@@ -22,7 +22,7 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
-=======
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -230,4 +230,4 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
->>>>>>> 9b4a749b152976125f3e5e5de2089c72b9a3a927
+
