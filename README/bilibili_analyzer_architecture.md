@@ -4,6 +4,14 @@
 
 ---
 
+# 快速安装说明
+
+```Bash
+    pip install -r requirements.txt
+```
+
+---
+
 ## 目录结构总览
 
 ```

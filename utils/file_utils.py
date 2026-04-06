@@ -1,21 +1,25 @@
 import json
 from pathlib import Path
+from datetime import datetime
+import os
 
+def save_profile(profile, bv_id: str):
+    """
+    保存UP主信息（分类版）
+    """
 
-def save_profile(profile, path: Path):
-    '''
-        with open(...) as f
-            这种写法会自动管理文件资源，确保在使用完文件后正确关闭它，即使在过程中发生异常也能保证文件被关闭。
-            "W"表示写入模式，如果文件不存在会创建，如果存在会覆盖。
-    '''
-    with open(path, "w", encoding="utf-8") as f:
-        '''
-            json.dump()函数将Python对象转换为JSON格式并写入文件。
-            ensure_ascii=False参数确保非ASCII字符（如中文）能正确写入，而不是被转义为Unicode编码。
-            indent=2参数使输出的JSON文件更易读，使用2个空格进行缩进。
-        '''
+    from pathlib import Path
+    import json
+
+    save_dir = Path("data/raw/profile")
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    file_path = save_dir / f"{bv_id}_profile.json"
+
+    with open(file_path, "w", encoding="utf-8") as f:
         json.dump(profile.to_dict(), f, ensure_ascii=False, indent=2)
 
+    print(f"UP主信息已保存: {file_path}")
 
 def load_profile(path: Path):
     from models.video import UploaderProfile
@@ -32,3 +36,34 @@ def load_profile(path: Path):
         data = json.load(f)
 
     return UploaderProfile.from_dict(data)
+
+def save_comments(bv_id: str, uid: int, comments: list):
+    """
+    保存评论数据（带时间版本）
+    """
+
+    from datetime import datetime
+    from pathlib import Path
+    import json
+
+    now = datetime.now()
+    time_str = now.strftime("%Y%m%d_%H%M%S")
+
+    data = {
+        "bv_id": bv_id,
+        "uid": uid,
+        "crawl_time": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "comment_count": len(comments),
+        "comments": comments
+    }
+
+    save_dir = Path("data/raw/comments")
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    # ⭐ 带时间版本
+    file_path = save_dir / f"{bv_id}_{time_str}_comments.json"
+
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+    print(f"评论数据已保存: {file_path}")
