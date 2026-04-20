@@ -36,7 +36,7 @@ def run_sentiment_pipeline(bv_id):
         try:
             score = get_sentiment_score(text)
 
-            # ⭐ 点赞加权（核心亮点）
+            #点赞加权
             weighted = score * (1 + like * 0.01)
 
             scores.append(weighted)

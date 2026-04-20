@@ -34,11 +34,18 @@ def get_video_info(bv_id):
 
 
 if __name__ == "__main__":
-    bv_id = "BV1uPDTBhEHX"
+    #饼叔巴尔干
+    #bv_id = "BV1uPDTBhEHX"
+
+    #测试视频1
+    bv_id = "BV15edfB8EK1"
+
+    #测试视频2
+    bv_id = "BV1kZ4y147Fi"
 
     print("开始抓取评论...")
 
-    comments = fetch_comments(bv_id, max_page=50)
+    comments = fetch_comments(bv_id, max_count=0)
 
     # ⭐ 获取UP主UID
     uid = get_video_info(bv_id)
