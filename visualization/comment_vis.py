@@ -1,14 +1,24 @@
 """
 comment_vis.py
 
+
+修改时间：
+    2026-04-06
+----------------------------------
 功能：
     评论频率可视化
 
 技术：
     - matplotlib
+===============================
 
 修改时间：
-    2026-04-06
+    2026-04-21
+----------------------------------
+修改内容：
+    1. 优化了图片保存路径的生成逻辑，确保路径的唯一性和可读性
+===============================
+
 """
 
 
@@ -22,7 +32,13 @@ plt.rcParams['font.sans-serif'] = ['SimHei']
 plt.rcParams['axes.unicode_minus'] = False
 
 
-def plot_top_comments(top_comments, bv_id):
+def plot_top_comments(top_comments, bv_id,video_info):
+    '''
+    video_info[0] = UID
+    video_info[1] = uname  
+    video_info[2] = title
+    '''
+  
     texts = [x[0] for x in top_comments]
     counts = [x[1] for x in top_comments]
 
@@ -33,14 +49,17 @@ def plot_top_comments(top_comments, bv_id):
 
     plt.gca().invert_yaxis()
 
-    # ⭐ 时间戳
+    uname = video_info[1]
+    title = video_info[2]
+
+    # 时间戳
     time_str = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    # ⭐ 确保目录存在
-    save_dir = Path("data/processed")
+    # 确保目录存在
+    save_dir = Path(f"data/processed/{uname}/{title}")
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    # ⭐ 保存图片（你问的那一行就在这里）
+    # 保存图片
     save_path = save_dir / f"{bv_id}_{time_str}_top_comments.png"
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
 
