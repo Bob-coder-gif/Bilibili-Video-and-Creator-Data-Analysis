@@ -3,6 +3,22 @@ from pathlib import Path
 from datetime import datetime
 import os
 
+
+'''
+file_utils.py
+功能：
+    文件操作工具函数
+
+修改时间：
+    2026-04-21
+---------------------------------- 
+修改内容：
+    1.更改了文件保存路径，使其包含UP主用户名和视频标题，确保保存的文件有清晰正确的路径
+
+===============================
+    
+    '''
+
 def save_profile(profile, bv_id: str):
     """
     保存UP主信息（分类版）
@@ -37,9 +53,12 @@ def load_profile(path: Path):
 
     return UploaderProfile.from_dict(data)
 
-def save_comments(bv_id: str, uid: int, comments: list):
+def save_comments(bv_id: str, video_info: list, comments: list):
     """
     保存评论数据（带时间版本）
+    video_info[0] = UID
+    video_info[1] = uname  
+    video_info[2] = title
     """
 
     from datetime import datetime
@@ -49,18 +68,25 @@ def save_comments(bv_id: str, uid: int, comments: list):
     now = datetime.now()
     time_str = now.strftime("%Y%m%d_%H%M%S")
 
+    uid = video_info[0]
+    uname = video_info[1]
+    title = video_info[2]
+
     data = {
+        "name": uname,
         "bv_id": bv_id,
         "uid": uid,
+        "uname": uname,
+        "title": title,
         "crawl_time": now.strftime("%Y-%m-%d %H:%M:%S"),
         "comment_count": len(comments),
         "comments": comments
     }
 
-    save_dir = Path("data/raw/comments")
+    save_dir = Path(f"data/raw/comments/{uname}/{title}")
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    # ⭐ 带时间版本
+    #  带时间版本
     file_path = save_dir / f"{bv_id}_{time_str}_comments.json"
 
     with open(file_path, "w", encoding="utf-8") as f:
