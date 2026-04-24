@@ -60,13 +60,16 @@ if __name__ == "__main__":
     #bv_id = "BV1uPDTBhEHX"
 
     #测试视频1  央视新闻
-    bv_id = "BV15edfB8EK1"
+    #bv_id = "BV15edfB8EK1"
 
     #测试视频2  死水bug
     #bv_id = "BV1kZ4y147Fi"
 
     #测试视频3  纲手
     #bv_id = "BV1834y1D7L8"
+
+    #测试视频4  弹幕回复超过一页
+    bv_id = "BV1LzrSBNEWi"
 
     print("开始抓取评论...")
 

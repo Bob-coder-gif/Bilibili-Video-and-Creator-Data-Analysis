@@ -19,6 +19,17 @@ def top_repeated_comments(comments, top_n=10):
     统计重复评论
     """
 
-    counter = Counter([c["text"] for c in comments])
+    all_texts = []
+
+    for comment_id, comment_detail in comments.items():
+        
+        if isinstance(comment_detail, dict):
+            
+            text = comment_detail.get("text")
+            
+            if text:
+                all_texts.append(text)
+
+    counter = Counter(all_texts)
 
     return counter.most_common(top_n)
