@@ -48,11 +48,13 @@ bili-comment-renderer-> 评论渲染
 ============================================
 
 修改时间：
-    2026-04-23
+    2026-04-23--2026-04-24
 --------------------------------------------
 修改内容：
+    1. 新增了爬取评论回复的功能。现在不仅能爬取主评论，还能爬取每条主评论下的回复，并且将回复嵌套在对应主评论的字典里，形成清晰的层级结构。
+    2. 修改了数据结构，将评论存储在一个字典里，key是评论ID（rpid），value是一个包含评论内容、点赞数、用户名等信息的字典。这样可以更方便地处理评论和回复的关系。
+    3. 在抓取回复时，将回复也存储在对应主评论的字典里，形成嵌套结构，方便后续分析和展示。
     
-
 
 ============================================
 
@@ -62,9 +64,10 @@ from playwright.sync_api import sync_playwright
 import random
 import os
 import time
- 
+from crawler.bilibili_state import save_login_state
+
 # ── 配置 ─────────────────────────────────────────────────────────────────────
-STORAGE_PATH = "./bilibili_state/bilibili_state.json"
+STORAGE_PATH = "./bilibili_data/bilibili_state.json"
  
 # 用于识别"这个响应是评论数据"的特征字段
 # 只要B站评论API返回的JSON里还有 "replies" 这个key，就能自动发现
@@ -75,28 +78,7 @@ REPLAY_SIGNATURE = "replies"
 
 # ─────────────────────────────────────────────────────────────────────────────
  
- 
-def save_login_state():
-    """首次运行：打开浏览器让用户手动登录，保存Cookie。"""
-    print("=" * 50)
-    print("首次运行：请在弹出的浏览器中登录B站账号")
-    print("登录完成后回到终端按回车键继续")
-    print("=" * 50)
-    with sync_playwright() as p:
-        '''
-            headless=False 让浏览器可见，方便用户登录。
-            headless=True 则在后台运行，无法手动登录。
-            new_context() 创建新的浏览器上下文，相当于新的独立浏览器环境。不受本地其他浏览器数据干扰
-        '''
-        browser = p.chromium.launch(headless=False)
-        context = browser.new_context()
-        page    = context.new_page()
-        page.goto("https://www.bilibili.com")
-        input("\n 登录完成后按回车保存状态...")
-        context.storage_state(path=STORAGE_PATH)
-        browser.close()
-    print(f"登录状态已保存到 {STORAGE_PATH}\n")
- 
+
  
 def fetch_comments(bv_id: str, max_count: int = 0) -> list[dict]:
     """
@@ -198,14 +180,6 @@ def fetch_comments(bv_id: str, max_count: int = 0) -> list[dict]:
                             "replies": [], # 用于存储回复
                         }
 
-                        # 保存主评论
-                        # comments.append({
-                        #     "type": "root", # 标记为主评论
-                        #     "mid": mid, 
-                        #     "text": text, 
-                        #     "like": like, 
-                        #     "name": name,
-                        # })
                         print(f"收集到评论：{text}（点赞 {like}，用户 {name}）")
 
                     # 检查是否有回复
@@ -286,6 +260,8 @@ def fetch_comments(bv_id: str, max_count: int = 0) -> list[dict]:
                 stall_times = 0
                 last_count  = current_count
 
+
+
         # ── 第四步：统一抓取回复 ───────────────────────────────────────────
         print(f"\n主评论抓取完成，开始抓取 {len(replies_to_fetch)} 个评论下的回复...")
  
@@ -313,14 +289,6 @@ def fetch_comments(bv_id: str, max_count: int = 0) -> list[dict]:
                                 "name": r_name,
                             })
 
-
-                            # comments.append({
-                            #     "type": "reply", # 标记为回复
-                            #     "mid": r_mid, 
-                            #     "text": r_text, 
-                            #     "like": r_like, 
-                            #     "name": r_name, 
-                            # })
                             print(f"   └─ 抓取到回复：{r_text[:20]}... (用户: {r_name})")
                 else:
                     print(f"   └─ 抓取回复失败: {resp.status}")
@@ -339,5 +307,3 @@ def fetch_comments(bv_id: str, max_count: int = 0) -> list[dict]:
     result = comments if max_count == 0 else comments[:max_count]
     print(f"\n抓取完成，共收集 {len(result)} 条评论")
     return result
- 
-

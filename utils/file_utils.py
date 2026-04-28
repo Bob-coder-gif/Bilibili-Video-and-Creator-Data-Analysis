@@ -16,7 +16,16 @@ file_utils.py
     1.更改了文件保存路径，使其包含UP主用户名和视频标题，确保保存的文件有清晰正确的路径
 
 ===============================
-    
+
+
+修改时间：
+    2026-04-28
+-----------------------------
+修改内容：
+    新增了save_danmu函数，用于保存弹幕数据，路径同样包含UP主用户名和视频标题，确保保存的文件有清晰正确的路径
+
+===============================
+
     '''
 
 def save_profile(profile, bv_id: str):
@@ -93,3 +102,44 @@ def save_comments(bv_id: str, video_info: list, comments: list):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
     print(f"评论数据已保存: {file_path}")
+
+
+def save_danmu(bv_id: str, video_info: list, danmus: list):
+    """
+    保存弹幕数据
+    video_info[0] = UID
+    video_info[1] = uname  
+    video_info[2] = title
+    """
+
+    from datetime import datetime
+    from pathlib import Path
+    import json
+
+    now = datetime.now()
+    time_str = now.strftime("%Y%m%d_%H%M%S")
+
+    uid = video_info[0]
+    uname = video_info[1]
+    title = video_info[2]
+
+    data = {
+        "name": uname,
+        "bv_id": bv_id,
+        "uid": uid,
+        "uname": uname,
+        "title": title,
+        "crawl_time": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "danmu_count": len(danmus),
+        "danmus": danmus
+    }
+
+    save_dir = Path(f"data/raw/danmu/{uname}/{title}")
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    file_path = save_dir / f"{bv_id}_{time_str}_danmu.json"
+
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+    print(f"弹幕数据已保存: {file_path}")
