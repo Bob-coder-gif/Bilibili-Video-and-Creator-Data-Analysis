@@ -61,8 +61,8 @@ def plot_top_comments(top_comments, bv_id,video_info):
 
     # 保存图片
     save_path = save_dir / f"{bv_id}_{time_str}_top_comments.png"
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
 
     print(f"图片已保存: {save_path}")
+    plt.close()  
 
     plt.show()
