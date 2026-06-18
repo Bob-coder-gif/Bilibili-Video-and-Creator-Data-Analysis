@@ -12,3 +12,13 @@ numpy
 jieba
 wordcloud
  
+
+# 核心依赖
+pandas>=2.0
+tqdm
+jieba
+
+# 情绪分析（二选一或都装）
+snownlp          # 轻量，首选
+# transformers   # BERT 方案，取消注释即可
+# torch          # BERT 需要

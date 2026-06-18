@@ -21,9 +21,9 @@
 
 
 import pipeline.crawler_pipeline
-
+import pipeline.sentiment_pipeline
 
 
 if __name__ == "__main__":
     pipeline.crawler_pipeline.crawler_pipeline()
-    
+    pipeline.sentiment_pipeline.sentiment_pipeline()
