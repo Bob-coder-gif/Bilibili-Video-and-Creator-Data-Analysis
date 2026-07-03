@@ -3,7 +3,15 @@ visualization/report.py
 生成情绪分析报告（JSON 格式）
 不再生成 HTML/ECharts 可视化页面，所有统计结果汇总为 JSON 数据结构，
 通过 utils.file_utils.save_report 保存到:
-    data/report/{uname}/{title}/{bv_id}_{time_str}_report.json
+    data/report/{uname}/{title}/{bv_id}/{time_str}/report.json
+
+修改时间：
+    2026-06-27
+-----------------------------
+修改内容：
+    generate_report 新增可选参数 time_str，透传给 save_report，
+    保证 report.json 与同一次任务的其它产物落在同一个 {time_str}/ 目录下。
+    不传时由 save_report 内部自行生成（向后兼容）。
 """
 
 from __future__ import annotations
@@ -115,12 +123,14 @@ def generate_report(
     keywords_neg: list[dict],
     bv_id: str,
     video_info: list,
+    time_str: str | None = None,
 ) -> str:
     """
     生成情绪分析报告并保存为 JSON 文件
     bv_id, video_info 用于拼接保存路径:
-        data/report/{uname}/{title}/{bv_id}_{time_str}_report.json
+        data/report/{uname}/{title}/{bv_id}/{time_str}/report.json
     video_info[0] = UID, video_info[1] = uname, video_info[2] = title
+    time_str: 同一次任务统一的时间目录名，透传给 save_report；不传则内部生成。
 
     返回最终保存的文件路径
     """
@@ -128,4 +138,4 @@ def generate_report(
         comments_df, danmaku_df, label_col,
         keywords_all, keywords_pos, keywords_neg,
     )
-    return file_utils.save_report(report_data, bv_id, video_info)
+    return file_utils.save_report(report_data, bv_id, video_info, time_str=time_str)

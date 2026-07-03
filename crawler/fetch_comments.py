@@ -6,104 +6,98 @@ commentapp-> 评论区最外层容器id
 bili-comment-renderer-> 评论渲染
     在这个标签下可以找到评论和评论回复
 
-修改时间：
-    2026-04-06
---------------------------------------------
-使用技术：
-    - requests（HTTP请求）
-    - Bilibili Web API逆向
-    - 分页抓取
-
-===========================================
-
-修改时间：
-    2026-04-20
---------------------------------------------
-功能：
-    获取B站单视频所有评论（半永久版）
+历史修改记录（保留）：
+    2026-04-06  requests + API 逆向 + 分页抓取（初版）
+    2026-04-20  改为 Playwright 浏览器加载 + 网络拦截（半永久版）
+    2026-04-21  自动发现评论 API；修复重复评论问题；抓取作者 UID/用户名
+    2026-04-23~24  新增爬取回复并嵌套进主评论；评论改为以 rpid 为 key 的字典
+    2026-06-21  print 改 logger（debug/info/warning 分级）；关键计数写 log_event
+    2026-06-27  新增 progress 进度回调（实时条数）
 
 核心思路：
-    不自己构造API请求，而是让真实浏览器加载页面并滚动，
-    同时拦截浏览器自己发出的评论API响应。
-    这样无论B站怎么改风控参数、签名算法，都无需修改代码。
-
-使用技术：
-    - Playwright（浏览器自动化 + 网络拦截）
-    - 持久化登录态（避免重复登录）
-
-用法（在其他文件中导入）：
-    from fetch_comments import fetch_comments
-    data = fetch_comments("BV1xx411c7mD", max_count=0)
+    不自己构造 API 请求，而是让真实浏览器加载页面并滚动，
+    同时拦截浏览器自己发出的评论 API 响应。
 
 ============================================
-
 修改时间：
-    2026-04-21
+    2026-06-27（健壮性增强）
 --------------------------------------------
-修改内容：
-    增加了自动发现评论API的功能，不再需要预先知道API路径，只要B站的评论API返回的JSON里还有 "replies" 这个key，就能自动发现并抓取。
-    将026-4-20版本中存在的“不能爬取重复评论”问题修复了
-    增加了评论作者的UID和用户名的抓取，方便后续分析使用。
+修改内容（解决"连续跑多个任务时，部分任务爬到 0 条评论"的问题）：
+    原因：原代码打开页面后只死等固定的 1~2 秒就开始滚动。但 B 站评论区是 JS
+    异步加载的，连续跑多个任务时 B 站响应会变慢，固定的短等待经常赶不上评论区
+    初始化，导致一个评论 API 都没拦截到 → 0 条。
 
+    本次改动：
+      1. page.goto 后改为等待网络基本空闲（networkidle），并把评论区初始化的
+         等待时间放宽，给异步加载留足时间。
+      2. 新增"整页重试"：如果滚动若干轮后仍然 0 条评论且没发现评论 API，
+         自动重新加载页面再试一次（最多 _MAX_PAGE_RETRY 次），
+         覆盖"这次加载恰好没出来"的偶发情况。
+      3. 函数返回前加一个小随机延时，拉开连续任务之间的请求间隔，
+         降低被 B 站限流的概率。
+    这些改动不影响命令行单独跑，也不改变评论数据本身的结构。
 ============================================
-
-修改时间：
-    2026-04-23--2026-04-24
---------------------------------------------
-修改内容：
-    1. 新增了爬取评论回复的功能。现在不仅能爬取主评论，还能爬取每条主评论下的回复，并且将回复嵌套在对应主评论的字典里，形成清晰的层级结构。
-    2. 修改了数据结构，将评论存储在一个字典里，key是评论ID（rpid），value是一个包含评论内容、点赞数、用户名等信息的字典。这样可以更方便地处理评论和回复的关系。
-    3. 在抓取回复时，将回复也存储在对应主评论的字典里，形成嵌套结构，方便后续分析和展示。
-    
-
-============================================
-
 """
 
 from playwright.sync_api import sync_playwright
 import random
 import os
 import time
-from crawler.bilibili_state import save_login_state
+import config.config as cfg
+from crawler.bilibili_state import save_login_state, launch_browser
+from utils.log_utils import get_logger, log_event
+
+logger = get_logger()
 
 # ── 配置 ─────────────────────────────────────────────────────────────────────
-STORAGE_PATH = "./bilibili_data/bilibili_state.json"
- 
-# 用于识别"这个响应是评论数据"的特征字段
-# 只要B站评论API返回的JSON里还有 "replies" 这个key，就能自动发现
-# （这比API路径稳定得多，基本不会变）
+STORAGE_PATH = cfg.STORAGE_PATH
+
 COMMENT_SIGNATURE = "replies"
-#预添加
 REPLAY_SIGNATURE = "replies"
 
-# ─────────────────────────────────────────────────────────────────────────────
- 
+# 抓回复时，每处理多少个就汇报一次进度
+_REPLY_REPORT_EVERY = 20
 
- 
-def fetch_comments(bv_id: str, max_count: int = 0) -> list[dict]:
+# 整页重试次数：滚动若干轮仍 0 条评论且没发现评论 API 时，重新加载页面重试
+_MAX_PAGE_RETRY = 2
+
+# 连续任务之间的随机间隔（秒），降低被限流概率
+_BETWEEN_TASK_DELAY = (2.0, 5.0)
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _report(progress, stage, message="", **extra):
+    """安全调用进度回调：progress 为 None 时什么也不做"""
+    if progress is not None:
+        progress(stage, message, **extra)
+
+
+def fetch_comments(bv_id: str, max_count: int = 0, progress=None) -> list[dict]:
     """
     抓取指定BV号视频的评论。
- 
+
     参数：
-        bv_id     : 视频BV号，例如 "BV1xx411c7mD"
+        bv_id     : 视频BV号
         max_count : 最多收集多少条，0 = 不限制（抓全部）
- 
+        progress  : 可选进度回调；None 时不汇报
+
     返回：
-        [{"text": "评论内容", "like": 点赞数}, ...]
+        评论字典（key=rpid）。
     """
     if not os.path.exists(STORAGE_PATH):
         save_login_state()
- 
+
     comments = {}
 
-    detected_api = None   # 动态发现的评论API路径（去掉query参数后的纯路径）
-    reply_api    = None   # (暂时没有找到稳定获取的方法)
+    detected_api = None
+    reply_api    = None
+    reply_api_prefix = None
 
-    replies_to_fetch = []  # 存储待抓取的回复API链接
-
+    replies_to_fetch = []
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
+        browser = launch_browser(p, headless=True)
         context = browser.new_context(
             storage_state=STORAGE_PATH,
             user_agent=(
@@ -115,195 +109,219 @@ def fetch_comments(bv_id: str, max_count: int = 0) -> list[dict]:
         )
         page = context.new_page()
 
-        """
-            FOR CONTRAST:
-
-            ROOT API:
-            https://api.bilibili.com/x/v2/reply/wbi/main?oid=384634124&type=1&mode=3&pagination_str=%7B%22offset%22:%22%22%7D&plat=1&seek_rpid=&web_location=1315875&w_rid=b67feef3024b98d0dba1f973c27d3577&wts=1776936375        
-            
-            SON API:
-            https://api.bilibili.com/x/v2/reply/reply?oid=384634124&type=1&root=299637885936&ps=10&pn=1&web_location=333.788
-        
-        """
-
         # ── 动态拦截：自动发现评论API + 收集数据
         def on_response(response):
             nonlocal detected_api
             nonlocal reply_api
- 
-            # 跳过明显无关的资源（图片、字体、CSS、JS等）
+            nonlocal reply_api_prefix
+
             content_type = response.headers.get("content-type", "")
             if "json" not in content_type:
                 return
- 
+
             try:
                 data = response.json()
             except Exception:
                 return
- 
-            # 判断这个JSON响应是否包含评论数据特征
-            replies = (data.get("data")or {}).get(COMMENT_SIGNATURE)
+
+            replies = (data.get("data") or {}).get(COMMENT_SIGNATURE)
             if not replies:
                 return
- 
-            # 第一次发现评论API时，记录路径并打印
-            if detected_api is None:
-                # 只保留路径部分，去掉 query 参数（?type=1&oid=...）
-                print(f"response：{response.url}")
-                detected_api = response.url.split("?")[0]
-                print(f"自动发现评论API：{detected_api}")
-                reply_api_prefix = detected_api.replace("wbi/main", "reply")
-                print(f"自动推测回复API：{reply_api_prefix}")
 
- 
-            # 收集评论
+            if detected_api is None:
+                logger.debug(f"response：{response.url}")
+                detected_api = response.url.split("?")[0]
+                reply_api_prefix = detected_api.replace("wbi/main", "reply")
+                logger.debug(f"自动发现评论API：{detected_api}")
+                logger.debug(f"自动推测回复API：{reply_api_prefix}")
+                log_event("comment_api_detected", api=detected_api, reply_api=reply_api_prefix)
+
             for item in replies:
                 try:
                     text = item.get("content", {}).get("message", "").strip()
                     like = item.get("like", 0)
                     mid = item.get("mid", "")
                     name = item.get("member", {}).get("uname", "")
-                    rpid = item.get("rpid", "") # 评论ID
-                    oid = item.get("oid", "")   # 视频OID
-                    type_ = item.get("type", 1) # 类型
-
-                    print("正确爬取到一条评论，正在做格式化处理...")
+                    rpid = item.get("rpid", "")
+                    oid = item.get("oid", "")
+                    type_ = item.get("type", 1)
 
                     if text:
-                        print("正在尝试格式化评论...")
                         comments[rpid] = {
-                            "type": "root", # 标记为主评论
+                            "type": "root",
                             "mid": mid,
                             "text": text,
                             "like": like,
                             "name": name,
-                            "replies": [], # 用于存储回复
+                            "replies": [],
                         }
+                        logger.debug(f"收集到评论：{text}（点赞 {like}，用户 {name}）")
 
-                        print(f"收集到评论：{text}（点赞 {like}，用户 {name}）")
-
-                    # 检查是否有回复
-                    # sub_reply_entry_text 存在通常意味着有回复，例如 "共10条回复"
-                    has_reply = bool(item.get("reply_control",{}).get("sub_reply_entry_text", ""))
-                    
+                    has_reply = bool(item.get("reply_control", {}).get("sub_reply_entry_text", ""))
                     if has_reply and reply_api_prefix:
-                        # 构造回复的API URL，加入队列
-                        # 注意：这里只是构造URL，不发送请求，避免阻塞
                         url = f"{reply_api_prefix}?oid={oid}&type={type_}&root={rpid}&ps=10&pn=1"
                         replies_to_fetch.append(url)
-                        
+
                 except Exception as e:
-                    print(f"   └─ 处理评论时出错: {e}") 
+                    logger.warning(f"处理评论时出错: {e}")
                     continue
- 
+
         page.on("response", on_response)
-        # ─────────────────────────────────────────────────────────────────────
- 
-        print(f"正在打开视频页：https://www.bilibili.com/video/{bv_id}")
-        page.goto(
-            f"https://www.bilibili.com/video/{bv_id}",
-            timeout=60000,
-            wait_until="domcontentloaded"
-        )
-        page.wait_for_timeout(4000)
- 
-        # ── 第一步：快速跳到底部，触发评论区初始化 ───────────────────────────
-        print("跳转到评论区...")
-        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        page.wait_for_timeout(3000)
- 
-        # 往回滚一点，确保评论区进入视口
-        page.evaluate("window.scrollBy(0, -300)")
-        page.wait_for_timeout(2000)
- 
-        # ── 第二步：等待评论容器出现 ──────────────────────────────────────────
-        COMMENT_SELECTORS = [
-            "#commentapp",
-            ".comment-container",
-            "[id^='comment']",
-        ]
-        for sel in COMMENT_SELECTORS:
+
+        # ====================================================================
+        # 打开页面 + 触发评论区加载，带"整页重试"：
+        # 若某次加载后滚动若干轮仍 0 条评论且没发现评论 API，重新加载再试。
+        # ====================================================================
+        for attempt in range(1, _MAX_PAGE_RETRY + 2):  # 首次 + 最多 _MAX_PAGE_RETRY 次重试
+            logger.debug(f"正在打开视频页（第 {attempt} 次尝试）：https://www.bilibili.com/video/{bv_id}")
+            page.goto(
+                f"https://www.bilibili.com/video/{bv_id}",
+                timeout=60000,
+                wait_until="domcontentloaded",
+            )
+
+            # 1) 先等网络基本空闲，给页面异步资源加载留时间（连续跑时尤其重要）
             try:
-                page.wait_for_selector(sel, timeout=5000)
-                print(f"评论区已加载（selector: {sel}）")
-                break
+                page.wait_for_load_state("networkidle", timeout=8000)
             except Exception:
-                continue
- 
-        # ── 第三步：持续小步滚动，触发分页加载 ───────────────────────────────
-        print("开始持续滚动加载评论...\n")
+                # 网络一直不空闲也没关系，继续往下，靠后面的滚动+等待兜底
+                logger.debug("等待 networkidle 超时，继续尝试触发评论区")
+
+            # 2) 跳到底部触发评论区初始化，并多给一点等待时间
+            logger.debug("跳转到评论区...")
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            page.wait_for_timeout(2000)
+            page.evaluate("window.scrollBy(0, -300)")
+            page.wait_for_timeout(1500)
+
+            # 3) 等评论容器出现（等待时间放宽到 5 秒）
+            COMMENT_SELECTORS = ["#commentapp", ".comment-container", "[id^='comment']"]
+            for sel in COMMENT_SELECTORS:
+                try:
+                    page.wait_for_selector(sel, timeout=5000)
+                    logger.debug(f"评论区已加载（selector: {sel}）")
+                    break
+                except Exception:
+                    continue
+
+            # 4) 再等一会，给评论 API 真正发出来的时间
+            page.wait_for_timeout(2000)
+
+            # 判断这次加载是否成功"摸到"了评论：发现了评论 API 或已收到评论
+            if detected_api is not None or len(comments) > 0:
+                logger.debug(f"第 {attempt} 次尝试已捕获到评论数据，进入滚动收集")
+                break
+
+            # 没摸到评论：如果还有重试机会，重新加载；否则放弃（可能是真的没评论）
+            if attempt <= _MAX_PAGE_RETRY:
+                logger.warning(f"第 {attempt} 次未捕获到评论数据，重新加载页面重试…")
+                log_event("fetch_comments_retry", bv_id=bv_id, attempt=attempt)
+                page.wait_for_timeout(random.randint(1500, 3000))
+            else:
+                logger.warning("多次尝试仍未捕获到评论数据，可能该视频确实无评论或被限流")
+                log_event("fetch_comments_no_data", bv_id=bv_id)
+
+        # ── 持续小步滚动，触发分页加载
+        logger.info("开始爬取评论...")
+        _report(progress, "crawl_comments", "正在爬取评论…")
         stall_times = 0
         last_count  = 0
- 
+
         while True:
             if max_count > 0 and len(comments) >= max_count:
-                print(f"\n已达到设定上限 {max_count} 条，停止")
+                logger.debug(f"已达到设定上限 {max_count} 条，停止")
                 break
- 
+
             page.evaluate("window.scrollBy(0, window.innerHeight * 0.5)")
-            page.wait_for_timeout(random.randint(2000, 4000))
- 
+            page.wait_for_timeout(random.randint(1000, 2000))
+
             current_count = len(comments)
-            print(f"  已收集：{current_count} 条评论", end="\r")
- 
+            logger.debug(f"已收集：{current_count} 条评论")
+            _report(progress, "crawl_comments",
+                    f"正在爬取评论…已 {current_count} 条",
+                    comment_count=current_count)
+
             if current_count == last_count:
                 stall_times += 1
- 
                 if stall_times == 3:
-                    print(f"\n  [卡住] 尝试重新触发加载...")
+                    logger.debug("[卡住] 尝试重新触发加载...")
                     page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    page.wait_for_timeout(2500)
+                    page.wait_for_timeout(1000)
                 if stall_times >= 7:
-                    print(f"\n连续无新数据，确认已到底，停止")
+                    logger.debug("连续无新数据，确认已到底，停止")
                     break
             else:
                 stall_times = 0
                 last_count  = current_count
 
+        # 主评论爬完，汇报最终主评论数
+        _report(progress, "crawl_comments",
+                f"主评论爬取完成，共 {len(comments)} 条，开始抓取回复…",
+                comment_count=len(comments))
 
+        # ── 统一抓取回复
+        total_replies_urls = len(replies_to_fetch)
+        logger.info(f"主评论抓取完成，共 {len(comments)} 条，开始抓取 {total_replies_urls} 个评论下的回复...")
 
-        # ── 第四步：统一抓取回复 ───────────────────────────────────────────
-        print(f"\n主评论抓取完成，开始抓取 {len(replies_to_fetch)} 个评论下的回复...")
- 
-                # 遍历队列，发起请求
+        reply_fail_count = 0
+        reply_collected = 0
+
         for idx, url in enumerate(replies_to_fetch):
             try:
-                # 使用 context.request 复用浏览器的 Cookie
                 resp = context.request.get(url)
                 if resp.status == 200:
                     r_data = resp.json()
                     r_replies = (r_data.get("data") or {}).get("replies", [])
-                    
                     for r_item in r_replies:
                         r_text = r_item.get("content", {}).get("message", "").strip()
                         r_like = r_item.get("like", 0)
                         r_mid = r_item.get("mid", "")
                         r_name = r_item.get("member", {}).get("uname", "")
-                        r_root = r_item.get("root", "") 
+                        r_root = r_item.get("root", "")
                         if r_text:
                             comments[r_root]["replies"].append({
-                                "type": "reply", # 标记为回复
+                                "type": "reply",
                                 "mid": r_mid,
                                 "text": r_text,
                                 "like": r_like,
                                 "name": r_name,
                             })
-
-                            print(f"   └─ 抓取到回复：{r_text[:20]}... (用户: {r_name})")
+                            reply_collected += 1
+                            logger.debug(f"抓取到回复：{r_text[:20]}... (用户: {r_name})")
                 else:
-                    print(f"   └─ 抓取回复失败: {resp.status}")
-                    pass
+                    reply_fail_count += 1
+                    logger.debug(f"抓取回复失败: {resp.status}")
             except Exception as e:
-                print(f"   └─ 请求异常: {e}")
-                pass
-       
+                reply_fail_count += 1
+                logger.debug(f"请求异常: {e}")
+
+            if total_replies_urls and (
+                (idx + 1) % _REPLY_REPORT_EVERY == 0 or idx + 1 == total_replies_urls
+            ):
+                _report(progress, "crawl_comments",
+                        f"正在抓取回复… {idx + 1}/{total_replies_urls}（已收集 {reply_collected} 条回复）",
+                        reply_done=idx + 1, reply_total=total_replies_urls,
+                        reply_collected=reply_collected)
+
             time.sleep(0.1)
 
-
+        if reply_fail_count:
+            logger.warning(f"{reply_fail_count} 个回复请求失败，详情见 debug 日志")
 
         browser.close()
 
+    # 连续任务之间留一个随机间隔，降低被 B 站限流的概率
+    delay = random.uniform(*_BETWEEN_TASK_DELAY)
+    logger.debug(f"任务间隔等待 {delay:.1f}s")
+    time.sleep(delay)
 
     result = comments if max_count == 0 else comments[:max_count]
-    print(f"\n抓取完成，共收集 {len(result)} 条评论")
+    logger.info(f"抓取完成，共收集 {len(result)} 条评论，{reply_collected} 条回复")
+    log_event(
+        "fetch_comments_done",
+        bv_id=bv_id,
+        comment_count=len(result),
+        reply_count=reply_collected,
+        reply_fail_count=reply_fail_count,
+    )
     return result

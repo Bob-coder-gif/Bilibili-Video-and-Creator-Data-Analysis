@@ -8,6 +8,9 @@ import os
 import pandas as pd
 from datetime import datetime
 import config.config as cfg
+from utils.log_utils import get_logger
+
+logger = get_logger()
 
 def _load_json(path: str) -> list:
     with open(path, "r", encoding="utf-8") as f:
@@ -59,7 +62,8 @@ def load_comments(path: str, cfg) -> pd.DataFrame:
     列: id, text, time, like, user
     """
     if not os.path.exists(path):
-        print(f"[警告] 评论文件不存在: {path}")
+        # 文件缺失会导致后续整段分析全部跑空，必须让终端看到
+        logger.warning(f"评论文件不存在: {path}")
         return pd.DataFrame()
 
     records = _load_json(path)
@@ -77,7 +81,7 @@ def load_comments(path: str, cfg) -> pd.DataFrame:
             "source": "comment",
         })
     df = pd.DataFrame(rows)
-    print(f"[loader] 加载评论 {len(df)} 条")
+    logger.debug(f"[loader] 加载评论 {len(df)} 条")
     return df
 
 
@@ -87,7 +91,7 @@ def load_danmaku(path: str, cfg) -> pd.DataFrame:
     列: id, text, video_time, source
     """
     if not os.path.exists(path):
-        print(f"[警告] 弹幕文件不存在: {path}")
+        logger.warning(f"弹幕文件不存在: {path}")
         return pd.DataFrame()
 
     records = _load_json(path)
@@ -103,7 +107,7 @@ def load_danmaku(path: str, cfg) -> pd.DataFrame:
             "source":     "danmaku",
         })
     df = pd.DataFrame(rows)
-    print(f"[loader] 加载弹幕 {len(df)} 条")
+    logger.debug(f"[loader] 加载弹幕 {len(df)} 条")
     return df
 
 
@@ -114,7 +118,7 @@ def load_meta(path: str) -> dict:
     若文件不存在或字段缺失，对应值返回空字符串
     """
     if not os.path.exists(path):
-        print(f"[警告] 元信息文件不存在: {path}")
+        logger.warning(f"元信息文件不存在: {path}")
         return {"uname": "", "title": "", "bv_id": "", "uid": "", "crawl_time": ""}
 
     with open(path, "r", encoding="utf-8") as f:

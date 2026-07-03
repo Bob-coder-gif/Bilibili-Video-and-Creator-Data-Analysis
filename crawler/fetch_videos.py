@@ -2,7 +2,13 @@ from models.video import Video, VideoStats, UploaderProfile
 from datetime import datetime
 
 import models.video
-print(models.video.__file__)
+from utils.log_utils import get_logger
+
+logger = get_logger()
+
+# 排查 import 路径问题时加的调试信息，平时不需要看，改为 debug
+logger.debug(f"models.video 模块加载自: {models.video.__file__}")
+
 
 def fetch(mid: int) -> UploaderProfile:
     profile = UploaderProfile(mid=mid, name="test")

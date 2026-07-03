@@ -1,24 +1,45 @@
-# 网络请求
+# ============================================================
+# Bilibili 视频舆情分析项目 依赖
+# ============================================================
+# 安装: pip install -r requirements.txt
+# 注: BERTopic 相关依赖较重(含 torch 等),如暂不需要话题聚类,
+#     可注释掉"话题聚类"那一段,主流程不受影响。
+# ============================================================
+
+# ---------- 网络请求 ----------
 requests
- 
-# 浏览器自动化
-playwright
- 
-# 数据分析 & 可视化
-matplotlib
+curl_cffi            # 高速分页爬取(impersonate 反爬)
+
+# ---------- 浏览器自动化 ----------
+playwright           # 装完后还需执行: playwright install
+
+# ---------- Web 后端 ----------
+flask
+
+# ---------- 数据处理 ----------
+pandas>=2.0
 numpy
- 
-# 中文分词 & 词云
+tqdm
+
+# ---------- 中文分词 & 词云 ----------
 jieba
 wordcloud
- 
 
-# 核心依赖
-pandas>=2.0
-tqdm
-jieba
+# ---------- 可视化 ----------
+matplotlib
 
-# 情绪分析（二选一或都装）
-snownlp          # 轻量，首选
-# transformers   # BERT 方案，取消注释即可
-# torch          # BERT 需要
+# ---------- 情绪分析 (BERT) ----------
+transformers         # BERT 中文情绪模型
+torch                # transformers 的后端
+
+# ---------- 话题聚类 (BERTopic, 需求1) ----------
+# 较重,首次运行会下载 embedding 模型。不需要可整段注释。
+bertopic
+sentence-transformers   # BERTopic 的文本向量化后端
+scikit-learn            # 聚类/降维依赖
+umap-learn              # BERTopic 降维
+hdbscan                 # BERTopic 聚类
+
+# ============================================================
+# 已移除: snownlp (项目已统一使用 BERT 作为情绪分析后端)
+# ============================================================

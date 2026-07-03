@@ -47,45 +47,54 @@ bili弹幕存储结构说明：
 -----------------------------
 完成了2026年4月25日的版本，基本功能已完成，后续可以根据需要进行优化和升级。
 
+=============================================
+
+修改时间：
+    2026-6—21
+-----------------------------
+对与弹幕时间轴密度分布图的“弹幕出现时间仅仅只在00：15出现”的bug进行了修复
+
+修改时间：
+    2026-06-21（第二次）
+-----------------------------
+把 print 改为 logger.debug/info/warning，过程细节默认终端不显示
+
 """
 
 import requests
 import xml.etree.ElementTree as ET
 import time
 import random
+from utils.log_utils import get_logger, log_event
+
+logger = get_logger()
 
 
-# ── 获取 cid ─────────────────────────────────────────────
 def get_cid(bv_id: str) -> int:
-    """
-    根据 BV 号获取 cid
-    """
     url = "https://api.bilibili.com/x/web-interface/view"
     params = {"bvid": bv_id}
-
     headers = {
         "User-Agent": "Mozilla/5.0",
         "Referer": "https://www.bilibili.com/"
     }
-
     try:
         resp = requests.get(url, params=params, headers=headers)
         data = resp.json()
-
         cid = data["data"]["pages"][0]["cid"]
         return cid
-
     except Exception as e:
-        print(f"[错误] 获取 cid 失败: {e}")
+        # 拿不到 cid 后面全流程没法跑，属于异常情况，终端要看到
+        logger.warning(f"获取 cid 失败: {e}")
         return None
 
 
-# ── 解析 XML ─────────────────────────────────────────────
 def parse_danmu(xml_text: str) -> list[dict]:
     """
     解析弹幕 XML
+    （不再做 latin-1 -> utf-8 的二次转换，因为请求阶段已经强制用 utf-8 解码）
     """
     danmus = []
+    fail_count = 0
 
     try:
         root = ET.fromstring(xml_text)
@@ -93,79 +102,77 @@ def parse_danmu(xml_text: str) -> list[dict]:
         for d in root.findall("d"):
             try:
                 text = d.text
+                if text is None:
+                    continue
+
                 p = d.attrib.get("p", "").split(",")
 
                 danmu = {
-                    "time": float(p[0]),       # 出现时间
-                    "type": int(p[1]),         # 类型
-                    "size": int(p[2]),         # 字号
-                    "color": int(p[3]),        # 颜色
-                    "timestamp": int(p[4]),    # 发送时间
-                    "text": text.encode("latin-1").decode("utf-8")
+                    "time": float(p[0]),
+                    "type": int(p[1]),
+                    "size": int(p[2]),
+                    "color": int(p[3]),
+                    "timestamp": int(p[4]),
+                    "text": text,  # 已是正确的 utf-8 字符串，无需再转换
                 }
 
                 danmus.append(danmu)
 
-            except Exception:
+            except Exception as e:
+                fail_count += 1
                 continue
 
     except Exception as e:
-        print(f"[错误] 解析 XML 失败: {e}")
+        logger.warning(f"解析 XML 失败: {e}")
+
+    if fail_count:
+        # 个别弹幕解析失败不影响整体结果，降为 debug；
+        # 如果想知道具体丢了多少条，加 --verbose 看
+        logger.debug(f"有 {fail_count} 条弹幕解析失败被跳过")
 
     return danmus
 
 
-# ── 主函数 ─────────────────────────────────────────────
 def fetch_danmu(bv_id: str) -> list[dict]:
-    """
-    获取视频全部弹幕
+    logger.info("开始爬取弹幕...")
 
-    参数：
-        bv_id : 视频BV号
-
-    返回：
-        list[dict]
-    """
-
-    print(f"\n开始获取弹幕: {bv_id}")
-
-    # 1️获取 cid
     cid = get_cid(bv_id)
     if not cid:
         return []
 
-    print(f"获取到 cid: {cid}")
+    logger.debug(f"获取到 cid: {cid}")
 
-    # 2 构造 URL
     url = f"https://api.bilibili.com/x/v1/dm/list.so?oid={cid}"
-
     headers = {
         "User-Agent": "Mozilla/5.0",
         "Referer": "https://www.bilibili.com/"
     }
 
-    # 3️请求弹幕
     try:
-        # 随机延迟（防风控）
         time.sleep(random.uniform(0.5, 1.5))
-
         resp = requests.get(url, headers=headers)
 
         if resp.status_code != 200:
-            print(f"[错误] 请求失败: {resp.status_code}")
+            logger.warning(f"请求弹幕失败: HTTP {resp.status_code}")
             return []
 
+        # 关键修复：不依赖 requests 自动猜编码，强制按字节用 utf-8 解码
+        resp.encoding = "utf-8"
         xml_text = resp.text
 
     except Exception as e:
-        print(f"[错误] 请求弹幕失败: {e}")
+        logger.warning(f"请求弹幕失败: {e}")
         return []
 
-    # 4️解析
     danmus = parse_danmu(xml_text)
 
-    print(f"[INFO] 弹幕获取完成，共 {len(danmus)} 条")
+    logger.info(f"共获取到 {len(danmus)} 条弹幕")
 
-    
+    # 诊断信息：确认时间分布是否覆盖整个视频，过程细节，默认不显示
+    if danmus:
+        times = [d["time"] for d in danmus]
+        logger.debug(f"弹幕时间范围: {min(times):.1f}s ~ {max(times):.1f}s")
+
+    log_event("fetch_danmu_done", bv_id=bv_id, cid=cid, count=len(danmus))
 
     return danmus

@@ -22,8 +22,12 @@
 
 import pipeline.crawler_pipeline
 import pipeline.sentiment_pipeline
+import pipeline.pipeline_data_analysis
+
 
 
 if __name__ == "__main__":
-    pipeline.crawler_pipeline.crawler_pipeline()
-    pipeline.sentiment_pipeline.sentiment_pipeline()
+    bv_id = input("请输入视频 BV 号: ")
+    task = pipeline.crawler_pipeline.crawler_pipeline(bv_id)
+    task = pipeline.sentiment_pipeline.sentiment_pipeline(task)
+    task = pipeline.pipeline_data_analysis.pipeline_data_analysis(task)

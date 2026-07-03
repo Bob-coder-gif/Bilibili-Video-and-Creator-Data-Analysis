@@ -34,16 +34,33 @@ def _load_stopwords(path: str) -> set:
     return words
 
 
-def extract_keywords(df: pd.DataFrame, cfg, label_filter: str | None = None) -> list[dict]:
+def extract_keywords(
+    df: pd.DataFrame,
+    cfg,
+    label_filter: str | None = None,
+    label_col: str | None = None,
+) -> list[dict]:
     """
     从 text_clean 列提取关键词
     label_filter: None=全部, '正向'/'负向'/'中性' = 按情绪过滤
+    label_col: 用哪一列做情绪过滤（如 "bert_label" / "snownlp_label"）。
+               不传时按旧逻辑依次尝试 "label" -> "snownlp_label" -> 全空兜底，
+               保持对旧调用方式的兼容。
     返回 [{"word": str, "weight": float}, ...]
     """
     stopwords = _load_stopwords(cfg.STOPWORDS_FILE)
     jieba.analyse.set_stop_words(cfg.STOPWORDS_FILE) if cfg.STOPWORDS_FILE else None
 
-    sub = df if label_filter is None else df[df.get("label", df.get("snownlp_label", pd.Series())) == label_filter]
+    if label_filter is None:
+        sub = df
+    else:
+        if label_col and label_col in df.columns:
+            col = df[label_col]
+        else:
+            # 未显式指定 label_col 时，沿用旧的猜测逻辑作为兜底
+            col = df.get("label", df.get("snownlp_label", pd.Series(index=df.index, dtype=object)))
+        sub = df[col == label_filter]
+
     corpus = " ".join(sub["text_clean"].dropna().tolist())
 
     if not corpus.strip():

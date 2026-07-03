@@ -4,6 +4,9 @@ utils/cleaner.py
 """
 
 import re
+from utils.log_utils import get_logger
+
+logger = get_logger()
 
 
 # B 站常见无意义短弹幕（可自行扩充）
@@ -41,5 +44,6 @@ def clean_dataframe(df, text_col: str = "text"):
     df = df.copy()
     df["text_clean"] = df[text_col].map(clean_text)
     df = df[df["text_clean"].map(is_valid)].reset_index(drop=True)
-    print(f"[cleaner] 清洗后保留 {len(df)} 条")
+    # 清洗前后的数量是排查"为什么数据变少了"的关键信息，但属于过程细节
+    logger.debug(f"[cleaner] 清洗后保留 {len(df)} 条")
     return df
