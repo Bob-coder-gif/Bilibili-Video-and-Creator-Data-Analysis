@@ -1,386 +1,203 @@
-# bilibili-analyzer 文件职责说明
+# 文件职责说明
 
-每个文件具体做什么、包含哪些函数/类、输入输出是什么。
-
----
-
-## app/main.py
-
-**职责：** 轻量入口，仅做参数解析和流程分发，不包含业务逻辑。
-
-```
-main()
-  ├── 解析命令行参数（--mid, --horizon, --mode）
-  ├── 读取 config/settings.py 配置
-  └── 调用 pipeline/run_pipeline.py 的 run() 启动流程
-```
+> 逐个说明每个 Python 文件的职责、关键函数与依赖关系。
+> 配合《项目架构文档.md》一起看。
 
 ---
 
-## crawler/bilibili_client.py
+## app/ —— Web 服务与任务调度
 
-**职责：** 封装所有与 B 站 API 的底层通信，上层模块不直接调用 HTTP。
+### app/web.py
+Flask 网页后端，项目的实际入口（`python -m app.web`）。同时内嵌前端页面(HTML/JS)。
 
-```
-class BilibiliClient
-  ├── __init__(credential=None)     # 可选传入登录凭证（Credential 对象）
-  ├── get_user_info(mid)            # 拉取 UP 主基本信息（名称、粉丝数）
-  ├── get_video_list(mid, pn, ps)   # 分页拉取视频列表（单页）
-  ├── get_video_stat(bvid)          # 拉取单条视频的详细 stat（点赞/投币/收藏）
-  └── _handle_rate_limit()          # 请求限流：失败自动 sleep 重试
-```
+- 页面：`/`（首页：提交 BV 号 + 进度条 + 队列面板 + 历史列表）、
+  `/video/<bv_id>`（详情页）。
+- 接口：
+  - `POST /api/analyze` 提交任务，立刻返回 task_id（不阻塞）
+  - `GET  /api/task/<task_id>` 轮询任务进度
+  - `GET  /api/queue` 队列概览（正在跑 + 排队列表）
+  - `POST /api/task/<task_id>/cancel` 取消排队中的任务
+  - `POST /api/queue/clear` 清空队列（仅排队中的）
+  - `GET  /api/history` 已分析视频列表
+  - `GET  /api/history/<bv_id>` 某视频详情（历史/预警/话题）
+  - `GET  /api/image/<bv_id>/<kind>` 返回图片(趋势/词云/密度/高频弹幕)
+- 顶部设置 HuggingFace 国内镜像 + 离线环境变量（在所有 import 之前）。
+- 过滤 werkzeug 逐条请求日志，保留启动横幅与业务日志。
 
-- 依赖：`bilibili-api-python`
-- 输出：原始 dict（API 响应体），不做业务转换
+### app/task_runner.py
+任务队列，`queue.Queue` + 单 worker 线程串行执行。
 
----
+- `submit_task(bv_id)` 入队，返回 task_id
+- `get_task(task_id)` 查进度（含"前面还有几个"）
+- `get_queue_overview()` 队列概览
+- `cancel_task(task_id)` / `clear_queue()` 取消/清空排队任务
+- worker 依次调用三个 pipeline，并把进度实时写回内存任务表。
 
-## crawler/fetch_videos.py
-
-**职责：** 调用 BilibiliClient，将原始 API 响应转换为项目内部数据结构。
-
-```
-fetch_uploader_profile(mid, client, max_videos=500)
-  ├── 循环调用 client.get_video_list() 分页拉取
-  ├── 对每条视频调用 client.get_video_stat() 补全点赞/投币/收藏
-  ├── 将 dict 转换为 Video / VideoStats 对象
-  └── 返回 UploaderProfile
-
-fetch_follower_history(mid, client)
-  ├── 拉取粉丝数历史快照（若 API 支持）
-  └── 返回 [(datetime, follower_count), ...]
-```
-
-- 输入：mid（UP 主 UID）、BilibiliClient 实例
-- 输出：`UploaderProfile` 对象
+### app/main.py
+命令行入口（历史遗留）。日常使用已由 `web.py` 取代，保留用于命令行调试。
 
 ---
 
-## models/video.py
+## crawler/ —— 数据采集层
 
-**职责：** 定义项目全局数据结构，所有模块共享此契约，不含任何业务逻辑。
+### crawler/bilibili_state.py
+登录态管理 + 浏览器启动。
 
-```
-@dataclass VideoStats
-  ├── view, like, coin, favorite, share, reply, danmaku   # 各项统计字段
-  └── engagement (property)                               # 三连合计 = like+coin+favorite
+- `save_login_state()` 首次运行时弹出可见浏览器，手动登录后保存 cookie。
+- `launch_browser(p, headless)` 按 config 选择浏览器引擎启动，chromium 下
+  使用 `--headless=new`（新版无头模式，不易被 B 站识别为爬虫）。
 
-@dataclass Video
-  ├── bvid, title, pubdate, duration, stats, tags         # 基本字段
-  └── pubdate_week (property)                             # 返回 "2024-W03"，周粒度聚合用
+### crawler/fetch_comments.py
+爬取评论（含楼中楼回复）。
 
-@dataclass UploaderProfile
-  ├── mid, name, videos, follower_history                 # UP 主信息
-  └── videos_sorted() (method)                           # 按发布时间升序返回视频列表
-```
+- `fetch_comments(bv_id, max_count, progress)`：打开视频页 → 滚动触发评论
+  分页 → 拦截 B 站评论 API 响应收集数据 → 统一抓取回复。
+- 打开页面后等待网络空闲并放宽等待，附带整页重试，解决"连续跑多个任务
+  时部分任务爬到 0 条评论"的问题。
+- 通过 `progress` 回调实时汇报已爬取条数。
 
----
+### crawler/fetch_danmu.py
+爬取弹幕。
 
-## models/ml/trainer.py
+- `fetch_danmu(bv_id)`：先 `get_cid(bv_id)` 取视频的 cid，再请求弹幕 XML
+  接口，经 `parse_danmu(xml)` 把 XML 解析成结构化弹幕列表（含出现时间、内容等）。
+- 抓取的是 B 站实时弹幕接口，返回列表供后续可视化与分析。
 
-**职责：** 训练四个预测目标各自独立的 XGBoost 模型，保存到磁盘。
+### crawler/get_info_from_browser.py
+获取视频元信息与统计数据。
 
-```
-train_all_targets(df, params=None, n_splits=5, save=True)
-  ├── 遍历 TARGET_COLS = [view, follower_gain, engagement, video_count]
-  ├── 对每个目标调用 _train_single()
-  ├── 打印各目标的交叉验证 MAE
-  └── 调用 _save_models() 持久化
-
-_train_single(X, y, params, n_splits)
-  ├── 使用 TimeSeriesSplit 做时序交叉验证（禁止随机 split）
-  ├── 记录每折 MAE
-  └── 全量数据重新训练一次，返回最终模型
-
-_save_models(models, feature_cols)
-  ├── 每个模型保存为 data/processed/models/{target}.ubj
-  └── 特征列顺序保存为 feature_cols.json（推理时对齐用）
-```
-
-- 输入：`build_feature_matrix()` 的输出 DataFrame
-- 输出：`{ target_name: XGBRegressor }` + 磁盘文件
+- `get_video_info(bv_id)` 返回 `(video_info, stat)`：
+  `video_info = [uid, uname, title]`，`stat` 为播放/点赞/投币/收藏/
+  分享/弹幕/评论等计数字典。
 
 ---
 
-## models/ml/predictor.py
+## analyzer/ —— 分析层
 
-**职责：** 加载已训练模型，执行自回归滚动多步预测。
+### analyzer/bert_analyzer.py
+BERT 中文情绪分析。
 
-```
-class BilibiliPredictor
-  ├── __init__(models, feature_cols)
-  ├── load(model_dir) [classmethod]     # 从磁盘加载模型 + feature_cols.json
-  ├── predict(history_df, horizon=4)    # 主预测入口，返回未来 N 周 DataFrame
-  └── _build_next_row(df, next_week)    # 根据当前历史构造下一行特征（滞后+滚动）
+- `analyze(df, cfg)`：对 `text_clean` 列做情绪分类，新增 `bert_score` /
+  `bert_label`（正向/负向/中性）两列。
+- 模型 `uer/roberta-base-finetuned-jd-binary-chinese`，模块级单例避免重复加载。
+- import transformers 前设置 HF 镜像 + 离线；加载模型用 `local_files_only=True`
+  强制走本地缓存，彻底规避国内联网超时。
 
-predict() 滚动逻辑：
-  for step in range(horizon):
-    ├── 构造下一周特征行
-    ├── 四个模型各自预测
-    ├── 预测值写回历史 df（供下一步使用）
-    └── 收集结果
-```
+### analyzer/keyword_extractor.py
+关键词与词频提取（基于 jieba）。
 
-- 输入：历史特征 DataFrame（来自 `build_feature_matrix()`）
-- 输出：未来 N 周 DataFrame，列为四个预测目标，索引为 Period[W]
+- `extract_keywords(df, cfg, label_filter, label_col)` 用 jieba TF-IDF 提取关键词，
+  可按情绪标签(正向/负向)筛选。
+- `word_frequency(df, cfg)` 用 jieba 分词做词频统计，补充 TF-IDF 之外的视角。
+- 内置一份 B 站场景停用词表（"哈哈哈"/"666"/"up主"/"弹幕"等无意义词），
+  也可通过 `cfg.STOPWORDS_FILE` 外挂扩充。
 
----
+### analyzer/topic_analyzer.py
+话题聚类（BERTopic）。
 
-## models/ml/evaluator.py
+- `run_topic_analysis(texts, bv_id, video_info, labels, time_str)`：
+  对评论文本聚类出话题，输出关键词/规模/情绪分布/示例。
+- 优雅降级：评论数少于 `TOPIC_MIN_DOCS` 或未安装 BERTopic 时跳过、返回 None，
+  不影响主流程。
 
-**职责：** 量化模型效果，提供回测误差、特征重要性、置信区间三类评估。
+### analyzer/video_stats.py
+视频统计数据保存、历史累积、趋势图生成。
 
-```
-backtest(df, models, test_weeks=8)
-  ├── 末尾 test_weeks 周作为测试集，前面全部作为训练集
-  ├── 计算每个目标的 MAE / MAPE / RMSE
-  └── 返回误差汇总 DataFrame
+- `save_video_stats(bv_id, video_info, stat, time_str)`：保存本次快照、
+  追加进 history.json、数据点足够时重绘趋势图。
+- `get_history(bv_id, video_info)` 读取累积历史。
+- 自动检测中文字体，趋势图分两个子图（播放/弹幕/评论 与 点赞/投币/收藏/分享）。
 
-feature_importance(models, feature_cols, top_n=15)
-  ├── 提取每个模型的 XGBoost gain 重要性
-  └── 返回 { target: pd.Series(feature -> importance) }
+### analyzer/warning_detector.py
+舆情预警检测。
 
-predict_with_interval(model_median, X, alpha=0.1)
-  ├── 用分位数回归模型估计置信区间（P10 ~ P90）
-  └── 返回 DataFrame，列：pred / lower / upper
-
-print_evaluation_report(df, models)
-  └── 汇总打印回测误差 + Top5 重要特征
-```
+- `detect_warnings(history)`：三类预警——负向占比过高、负向占比骤升、
+  播放量暴增。阈值可在 config 调整。
+- `record_sentiment_summary(...)` 把情绪摘要补写进历史最新记录。
+- `save_warnings(...)` 落盘预警结果。
 
 ---
 
-## features/feature_builder.py
+## pipeline/ —— 流程编排层
 
-**职责：** 将 `UploaderProfile` 原始数据转换为机器学习可用的特征矩阵，是数据层与模型层之间的核心桥梁。
+三个阶段通过 `task` 字典依次传递，`progress` 为可选进度回调。
 
-```
-build_feature_matrix(profile, dropna=True)     ← 主入口
-  ├── build_weekly_base(profile)
-  │     ├── 按自然周（Period[W]）聚合视频指标
-  │     └── reindex 补全缺失周，填 0，保证时间轴连续
-  ├── attach_follower_gain(weekly, profile)
-  │     ├── 粉丝快照按周取最后一个值
-  │     └── diff() 得到周增量
-  ├── add_lag_features(df, cols)
-  │     └── 滞后 1/2/3/4/8 周，命名规则：{col}_lag{n}
-  ├── add_rolling_features(df, cols)
-  │     └── 滚动 3/8 周均值 & 标准差，命名：{col}_roll{n}_mean/std
-  └── add_time_features(df)
-        ├── week_of_year / month / quarter
-        ├── is_year_end / is_new_year（节假日周标记）
-        └── week_sin / week_cos（正余弦编码，防止首尾不连续）
+### pipeline/crawler_pipeline.py
+采集阶段。爬评论 → 爬弹幕 → 弹幕可视化。生成本次任务统一的 `time_str`，
+返回包含 bv_id/video_info/comments/danmus/路径/stat/time_str 的 task。
 
-get_feature_cols(df)
-  └── 返回特征列名列表（排除四个目标列本身）
-```
+### pipeline/sentiment_pipeline.py
+情绪分析阶段。加载 → 清洗 → BERT 情绪分析 → 关键词 → 生成报告。
+并把"清洗后评论文本、情绪标签、情绪摘要"写回 task，供下游话题聚类/预警使用。
 
-- 输入：`UploaderProfile`
-- 输出：以 Period[W] 为索引的 `pd.DataFrame`，含目标列 + 所有特征列
+### pipeline/pipeline_data_analysis.py
+统计/预警/话题阶段。保存统计快照+趋势图 → 补写情绪摘要+预警检测 →
+BERTopic 话题聚类。三步顺序不可乱（预警依赖先落盘的统计+情绪摘要）。
 
 ---
 
-## analysis/metrics.py
+## visualization/ —— 可视化层
 
-**职责：** 计算单个 UP 主的基础统计指标，供 scoring 和可视化使用。
+### visualization/danmu_vis.py
+弹幕可视化，三张图：
 
-```
-calc_avg_view(profile)              # 平均单视频播放量
-calc_growth_rate(weekly_df, col)    # 指定列的周环比增长率序列
-calc_peak_week(weekly_df, col)      # 历史最高值所在周
-calc_posting_consistency(profile)   # 发布频率的稳定性（标准差）
-```
+- `plot_top_danmu(...)` 高频弹幕词条柱状图
+- `plot_danmu_density(...)` 弹幕时间轴密度图
+- `plot_danmu_wordcloud(...)` 弹幕词云
+- 保存到 `data/processed/danmu/.../{bv_id}/{time_str}/`。
 
----
+### visualization/report.py
+情绪分析报告(JSON)。
 
-## analysis/scoring.py
-
-**职责：** 综合多项指标，给 UP 主的成长潜力打分。
-
-```
-compute_score(profile, weekly_df)
-  ├── 播放量趋势得分（近期增长斜率）
-  ├── 互动率得分（engagement / view）
-  ├── 更新稳定性得分（发布间隔方差）
-  └── 加权求和，返回 0~100 分
-
-score_breakdown(profile, weekly_df)
-  └── 返回各维度分项得分 dict，用于可视化展示
-```
+- `generate_report(...)` 汇总情绪分布、时间趋势、关键词、高赞评论等为一个
+  JSON，经 `file_utils.save_report` 保存到 report.json。
 
 ---
 
-## analysis/trend.py
+## utils/ —— 工具层
 
-**职责：** 对历史时序数据做趋势分析，识别增长 / 平台期 / 下滑阶段。
+### utils/cleaner.py
+文本清洗。`clean_dataframe(df)` 生成 `text_clean` 列（去除 URL、@用户、
+[表情]、话题标签、特殊字符等），并按最小长度 `MIN_LEN` 过滤掉过短的无价值文本，
+返回清洗后的新 DataFrame 供情绪分析使用。
 
-```
-detect_trend_phase(series)
-  ├── 线性回归斜率判断整体趋势方向
-  └── 返回 "growing" / "stable" / "declining"
+### utils/loader.py
+数据加载。
 
-find_breakpoints(series)
-  └── 检测突变点（如某期视频爆火导致粉丝跳涨）
+- `load_comments(path, cfg)` / `load_danmaku(path, cfg)` 把评论/弹幕 JSON
+  分别读成 DataFrame（内部含时间戳解析 `_parse_timestamp`）。
+- `load_meta(path)` 从文件反查视频元信息(bv_id/uid/uname/title)，
+  供命令行单独调试、task 中缺元信息时兜底使用。
 
-moving_average(series, window)
-  └── 简单移动均值平滑，去除周度噪声
-```
+### utils/file_utils.py
+文件保存。`save_comments` / `save_danmu` / `save_report` / `save_word_freq` /
+`save_results`（带情绪标注 + 摘要）。所有产物按
+`{uname}/{title}/{bv_id}/{time_str}/` 目录结构落盘，函数接受统一的 `time_str`。
 
----
-
-## analysis/forecast_result.py
-
-**职责：** 【新增】将 predictor 的预测 DataFrame 解析为人类可读的结构化摘要。
-
-```
-parse_forecast(forecast_df, history_df)
-  ├── 计算预测值相对历史均值的变化幅度
-  ├── 标记显著增长 / 下滑的目标（超过阈值）
-  └── 返回结构化摘要 dict
-
-format_forecast_summary(summary_dict)
-  └── 格式化为可打印的文字描述，供 CLI 输出或报告使用
-```
+### utils/log_utils.py
+统一日志。`get_logger()` / `setup_logging()` 配置终端 + 文件日志；
+`log_event()` 写结构化运行事件(jsonl)，便于回溯。
 
 ---
 
-## visualization/trend_chart.py
+## config/ —— 配置层
 
-**职责：** 绘制 UP 主历史指标的时序折线图。
+### config/config.py
+全局配置：各类目录路径、情绪后端(`SENTIMENT_BACKEND="bert"`)、BERT 模型名、
+预警阈值、话题聚类参数(`TOPIC_MIN_DOCS` 等)、趋势图参数、统计字段等。
 
-```
-plot_weekly_trends(weekly_df, targets, save_path=None)
-  ├── 子图分别展示 view / follower_gain / engagement / video_count
-  ├── 标注历史最高点
-  └── 保存为 PNG 或直接 show()
-
-plot_correlation_heatmap(weekly_df)
-  └── 四个指标之间的相关性热力图
-```
+### config/hf_setup.py
+HuggingFace 国内网络设置。设置 `HF_ENDPOINT=hf-mirror.com` 国内镜像 +
+离线优先，须在 import transformers 之前生效（相关逻辑亦内联在
+`bert_analyzer.py`/`web.py` 顶部以确保时机）。
 
 ---
 
-## visualization/forecast_chart.py
+## 已移除的文件（历史记录）
 
-**职责：** 【新增】绘制历史数据 + 未来预测的对比图，含置信区间色带。
+以下文件属于早期"UP 主数据预测"设想或旧情绪后端，已删除，不在当前架构中：
 
-```
-plot_forecast(history_df, forecast_df, target, interval_df=None, save_path=None)
-  ├── 历史段：实线
-  ├── 预测段：虚线 + 不同颜色
-  ├── 置信区间：半透明色带（若传入 interval_df）
-  └── 竖线分隔历史与预测边界
-
-plot_all_forecasts(history_df, forecast_df)
-  └── 四个目标指标一次性绘制为 2×2 子图布局
-```
-
----
-
-## pipeline/run_pipeline.py
-
-**职责：** 【新增】统一调度全链路，替代 main.py 中的流程控制逻辑。
-
-```
-run(mid, horizon=4, train=True, use_cache=True)
-  ├── Step 1  fetch_uploader_data(mid)         数据采集
-  ├── Step 2  load/save profile cache          本地 JSON 缓存读写
-  ├── Step 3  build_feature_matrix(profile)    特征构造
-  ├── Step 4  train_all_targets(df)            模型训练（或跳过加载已有）
-  ├── Step 5  print_evaluation_report()        回测评估
-  ├── Step 6  predictor.predict(df, horizon)   滚动预测
-  └── Step 7  保存结果至 data/processed/forecast_{mid}.csv
-
-CLI 参数：
-  --mid        UP 主 UID（必填）
-  --horizon    预测未来几周，默认 4
-  --no-train   跳过训练，复用已有模型
-  --no-cache   忽略本地缓存，强制重新拉取
-```
-
----
-
-## utils/file_utils.py
-
-**职责：** 通用文件读写工具，统一处理路径和序列化格式。
-
-```
-save_json(data, path)         # dict → JSON 文件，自动创建目录
-load_json(path)               # JSON 文件 → dict，文件不存在返回 None
-save_dataframe(df, path)      # DataFrame → CSV / Parquet（按后缀自动选择）
-load_dataframe(path)          # CSV / Parquet → DataFrame
-ensure_dir(path)              # 确保目录存在，不存在则创建
-```
-
----
-
-## utils/logger.py
-
-**职责：** 统一日志配置，所有模块通过此处获取 logger，不直接使用 print。
-
-```
-get_logger(name)
-  ├── 返回配置好的 logging.Logger 实例
-  ├── 同时输出到控制台（INFO 级别）
-  └── 写入 logs/run_{date}.log 文件（DEBUG 级别）
-```
-
----
-
-## config/settings.py
-
-**职责：** 集中管理所有可配置参数，各模块从此处 import，不硬编码。
-
-```python
-# 路径配置
-DATA_DIR   = Path("data")
-MODEL_DIR  = DATA_DIR / "processed" / "models"
-CACHE_DIR  = DATA_DIR / "cache"
-LOG_DIR    = Path("logs")
-
-# 特征工程参数
-LAG_WEEKS    = [1, 2, 3, 4, 8]
-ROLLING_WINS = [3, 8]
-
-# 模型超参数
-XGB_PARAMS = {
-    "n_estimators":     300,
-    "learning_rate":    0.05,
-    "max_depth":        4,
-    "subsample":        0.8,
-    "colsample_bytree": 0.8,
-    "min_child_weight": 3,
-    "random_state":     42,
-}
-
-# 预测配置
-DEFAULT_HORIZON  = 4       # 默认预测周数
-BACKTEST_WEEKS   = 8       # 回测测试集周数
-CONFIDENCE_ALPHA = 0.1     # 置信区间 alpha（0.1 → 80% 区间）
-```
-
----
-
-## tests/
-
-**职责：** 各模块单元测试，后期补充。建议优先覆盖以下三处（最容易出 bug）：
-
-| 测试文件 | 测试重点 |
-|----------|----------|
-| `test_feature_builder.py` | 缺失周补全、滞后特征计算是否正确 |
-| `test_predictor.py` | 滚动预测是否真正用预测值而非历史值 |
-| `test_pipeline.py` | 端到端 mock 数据流转是否完整 |
-
----
-
-## requirements.txt
-
-```
-bilibili-api-python>=16.0   # B 站数据采集
-pandas>=2.0                 # 数据处理 & 时序聚合
-numpy>=1.26                 # 数值计算
-xgboost>=2.0                # 预测模型
-scikit-learn>=1.4           # TimeSeriesSplit、误差指标
-matplotlib>=3.8             # 可视化
-seaborn>=0.13               # 热力图等统计图表
-```
+- `features/`（含 `sentiment.py` 旧 SnowNLP 后端、`comment_analysis.py`
+  高频评论统计）—— 情绪已统一用 BERT，高频评论统计已下线。
+- `crawler/fetch_videos.py` —— UP 主视频列表采集（预测项目遗留）。
+- `models/video.py` 及 `tests/test_model_video.py` —— 预测项目的数据结构与测试。

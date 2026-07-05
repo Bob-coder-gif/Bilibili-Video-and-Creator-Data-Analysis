@@ -2,8 +2,10 @@
 # Bilibili 视频舆情分析项目 依赖
 # ============================================================
 # 安装: pip install -r requirements.txt
-# 注: BERTopic 相关依赖较重(含 torch 等),如暂不需要话题聚类,
-#     可注释掉"话题聚类"那一段,主流程不受影响。
+# 装完 playwright 后还需执行一次: playwright install
+#
+# 注: BERTopic 相关依赖较重(含 torch 等)。如暂不需要话题聚类,
+#     可注释掉"话题聚类"那一段,主流程(爬取+情绪分析+预警)不受影响。
 # ============================================================
 
 # ---------- 网络请求 ----------
@@ -14,7 +16,7 @@ curl_cffi            # 高速分页爬取(impersonate 反爬)
 playwright           # 装完后还需执行: playwright install
 
 # ---------- Web 后端 ----------
-flask
+flask                # 网页界面 + 任务队列后端
 
 # ---------- 数据处理 ----------
 pandas>=2.0
@@ -39,6 +41,16 @@ sentence-transformers   # BERTopic 的文本向量化后端
 scikit-learn            # 聚类/降维依赖
 umap-learn              # BERTopic 降维
 hdbscan                 # BERTopic 聚类
+
+# ============================================================
+# 国内网络说明 (HuggingFace 镜像)
+# ------------------------------------------------------------
+# transformers / bertopic / sentence-transformers 首次会从 HuggingFace
+# 下载模型。国内网络无法直连 huggingface.co,项目已在代码中(见
+# analyzer/bert_analyzer.py 及 app/web.py 顶部)自动设置国内镜像
+# HF_ENDPOINT=https://hf-mirror.com 并优先使用本地缓存,无需额外配置。
+# 若首次下载模型,可临时关闭离线模式让其走镜像下载,详见 bert_analyzer.py 注释。
+# ============================================================
 
 # ============================================================
 # 已移除: snownlp (项目已统一使用 BERT 作为情绪分析后端)
