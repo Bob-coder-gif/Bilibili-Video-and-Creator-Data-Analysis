@@ -29,10 +29,16 @@ pipeline_data_analysis.py
     新增可选 progress 回调：在统计趋势 / 预警 / 话题聚类节点汇报进度，
     供网页后台任务实时显示。progress=None 时跳过。
 
-用法（app.main 等入口文件里）：
-    task = pipeline.crawler_pipeline.crawler_pipeline(bv_id)
-    task = pipeline.sentiment_pipeline.sentiment_pipeline(task)
-    task = pipeline.pipeline_data_analysis.pipeline_data_analysis(task)
+修改时间：
+    2026-09-28
+----------------------------------
+    删除 __main__ 入口和对 cfg.CURRENT_BV_ID / CURRENT_VIDEO_INFO 全局变量的兜底
+    （"黑板"模式遗留，config 中已删除）。
+
+调用方式（见 app/task_runner.py）：
+    task = crawler_pipeline(bv_id, progress)
+    task = sentiment_pipeline(task, progress)
+    task = pipeline_data_analysis(task, progress)
 ================================
 """
 
@@ -57,7 +63,7 @@ def _report(progress, stage, message="", **extra):
         progress(stage, message, **extra)
 
 
-def pipeline_data_analysis(task: dict | None = None, progress=None) -> dict:
+def pipeline_data_analysis(task: dict, progress=None) -> dict:
     """
     分析阶段入口。从 task 读取数据，依次完成统计/预警/话题聚类，结果写回 task 并落盘。
 
@@ -71,12 +77,9 @@ def pipeline_data_analysis(task: dict | None = None, progress=None) -> dict:
         warnings_path        预警结果文件路径
         topic_result         话题聚类结果（数据不足/未装 BERTopic 时为 None）
     """
-    if task is None:
-        task = {}
-
-    bv_id = task.get("bv_id") or cfg.CURRENT_BV_ID
-    video_info = task.get("video_info") or cfg.CURRENT_VIDEO_INFO
-    stat = task.get("stat", {})
+    bv_id = task.get("bv_id")
+    video_info = task.get("video_info")
+    stat = task.get("stat") or {}
 
     if not bv_id or not video_info:
         logger.warning(
@@ -144,7 +147,3 @@ def pipeline_data_analysis(task: dict | None = None, progress=None) -> dict:
     task["topic_result"] = topic_result
 
     return task
-
-
-if __name__ == "__main__":
-    pipeline_data_analysis(None)

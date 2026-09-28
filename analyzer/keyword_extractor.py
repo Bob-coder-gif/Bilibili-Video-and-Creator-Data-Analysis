@@ -1,10 +1,21 @@
 """
 analyzer/keyword_extractor.py
-基于 jieba TF-IDF 提取高频关键词 / 话题词
+基于 jieba 的关键词（TF-IDF）与词频提取
+
+修改时间：
+    2026-09-28
+----------------------------------
+    1. _load_stopwords 改为公开的 load_stopwords，弹幕词云和话题聚类也复用同一份停用词。
+    2. extract_keywords 的 label_col 改为按情绪过滤时必传，删除旧的列名猜测逻辑
+       （"label" / "snownlp_label" 都已不存在）。
+    3. 停用词文件只在第一次调用时加载一次（原来每次调用都重新读文件、重新设置 jieba）。
+    4. 内置停用词补充常见虚词和代词（"就是""这些""没有"等），它们在词云里占位置但没有信息量。
 """
 
-import os
 import collections
+import os
+from functools import lru_cache
+
 import pandas as pd
 
 try:
@@ -23,15 +34,26 @@ _BUILTIN_STOPWORDS = {
     "一个", "一下", "什么", "怎么", "为什么", "因为", "所以",
     "但是", "还是", "只是", "可以", "可能", "应该", "视频",
     "up", "up主", "主", "弹幕", "评论", "bilibili", "b站",
+    # 常见虚词 / 代词 / 连词（2026-09-28 补充）
+    "就是", "没有", "这些", "那些", "这个", "那个", "这样", "那样", "这么", "那么",
+    "这帮", "那帮", "于是", "然后", "如果", "虽然", "而且", "或者", "已经", "还有",
+    "不是", "我们", "你们", "他们", "她们", "自己", "大家", "一样", "知道", "觉得",
+    "现在", "时候", "真是", "确实", "好像", "其实", "一直", "一定", "一手", "一眼",
+    "还要", "只有", "为了", "出来", "起来", "一些", "有点", "这种", "那种", "东西",
 }
 
+_POS_ALLOW = ("ns", "n", "vn", "v", "an", "nz", "eng")
 
-def _load_stopwords(path: str) -> set:
+
+@lru_cache(maxsize=None)
+def load_stopwords(path: str = "") -> frozenset:
+    """内置停用词 + 可选的自定义停用词文件（每行一个词）"""
     words = set(_BUILTIN_STOPWORDS)
     if path and os.path.exists(path):
         with open(path, encoding="utf-8") as f:
             words.update(line.strip() for line in f if line.strip())
-    return words
+        jieba.analyse.set_stop_words(path)
+    return frozenset(words)
 
 
 def extract_keywords(
@@ -41,36 +63,25 @@ def extract_keywords(
     label_col: str | None = None,
 ) -> list[dict]:
     """
-    从 text_clean 列提取关键词
-    label_filter: None=全部, '正向'/'负向'/'中性' = 按情绪过滤
-    label_col: 用哪一列做情绪过滤（如 "bert_label" / "snownlp_label"）。
-               不传时按旧逻辑依次尝试 "label" -> "snownlp_label" -> 全空兜底，
-               保持对旧调用方式的兼容。
+    从 text_clean 列用 TF-IDF 提取关键词。
+    label_filter: None=全部；"正向" / "负向" / "中性" = 只取该情绪的文本（需同时传 label_col）
     返回 [{"word": str, "weight": float}, ...]
     """
-    stopwords = _load_stopwords(cfg.STOPWORDS_FILE)
-    jieba.analyse.set_stop_words(cfg.STOPWORDS_FILE) if cfg.STOPWORDS_FILE else None
+    stopwords = load_stopwords(cfg.STOPWORDS_FILE)
 
     if label_filter is None:
         sub = df
+    elif label_col and label_col in df.columns:
+        sub = df[df[label_col] == label_filter]
     else:
-        if label_col and label_col in df.columns:
-            col = df[label_col]
-        else:
-            # 未显式指定 label_col 时，沿用旧的猜测逻辑作为兜底
-            col = df.get("label", df.get("snownlp_label", pd.Series(index=df.index, dtype=object)))
-        sub = df[col == label_filter]
+        return []
 
     corpus = " ".join(sub["text_clean"].dropna().tolist())
-
     if not corpus.strip():
         return []
 
     keywords = jieba.analyse.extract_tags(
-        corpus,
-        topK=cfg.TOPN_KEYWORDS,
-        withWeight=True,
-        allowPOS=("ns", "n", "vn", "v", "an", "nz", "eng"),
+        corpus, topK=cfg.TOPN_KEYWORDS, withWeight=True, allowPOS=_POS_ALLOW,
     )
     return [
         {"word": w, "weight": round(float(wt), 4)}
@@ -81,11 +92,10 @@ def extract_keywords(
 
 def word_frequency(df: pd.DataFrame, cfg) -> list[dict]:
     """简单词频统计（jieba 分词），补充 TF-IDF 之外的视角"""
-    stopwords = _load_stopwords(cfg.STOPWORDS_FILE)
-    counter: collections.Counter = collections.Counter()
+    stopwords = load_stopwords(cfg.STOPWORDS_FILE)
+    counter = collections.Counter()
     for text in df["text_clean"].dropna():
-        words = jieba.cut(text)
-        for w in words:
+        for w in jieba.cut(text):
             w = w.strip()
             if len(w) > 1 and w not in stopwords:
                 counter[w] += 1

@@ -6,33 +6,28 @@ analyzer/warning_detector.py
     - 历史文件路径与 video_stats 对齐: data/analysis/{uname}/{title}/{bv_id}/history.json
     - 预警结果带时间目录: data/analysis/{uname}/{title}/{bv_id}/{time_str}/warnings.json
     save_warnings 新增可选参数 time_str。
+
+2026-09-28 修改：
+    目录拼接改用 utils.file_utils.video_dir，历史文件路径直接复用 video_stats 的，
+    不再各自维护一份 _bv_dir / _history_path。
 """
 
 from __future__ import annotations
 
 import json
 from datetime import datetime
-from pathlib import Path
 
 import config.config as cfg
+from analyzer.video_stats import history_file
+from utils.file_utils import video_dir
 from utils.log_utils import get_logger, log_event
 
 logger = get_logger()
 
 
-def _bv_dir(uname: str, title: str, bv_id: str) -> Path:
-    d = Path(cfg.ANALYSIS_DIR) / uname / title / bv_id
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def _history_path(uname: str, title: str, bv_id: str) -> Path:
-    return _bv_dir(uname, title, bv_id) / cfg.HISTORY_FILENAME_SUFFIX
-
-
 def record_sentiment_summary(bv_id: str, video_info: list, summary: dict) -> bool:
     uname, title = video_info[1], video_info[2]
-    path = _history_path(uname, title, bv_id)
+    path = history_file(uname, title, bv_id)
 
     if not path.exists():
         logger.warning(f"[warning] 还没有历史记录，无法写入情绪摘要: {path}")
@@ -119,10 +114,7 @@ def save_warnings(bv_id: str, video_info: list, warnings: list[dict], time_str: 
     uname, title = video_info[1], video_info[2]
     now = datetime.now()
     time_str = time_str or now.strftime("%Y%m%d_%H%M%S")
-
-    save_dir = _bv_dir(uname, title, bv_id) / time_str
-    save_dir.mkdir(parents=True, exist_ok=True)
-    path = save_dir / "warnings.json"
+    path = video_dir(cfg.ANALYSIS_DIR, video_info, bv_id, time_str) / "warnings.json"
 
     payload = {
         "bv_id": bv_id, "uname": uname, "title": title,
@@ -139,4 +131,4 @@ def save_warnings(bv_id: str, video_info: list, warnings: list[dict], time_str: 
     else:
         logger.info("✅ 未检测到舆情预警")
     log_event("warnings_saved", bv_id=bv_id, path=str(path), warning_count=len(warnings))
-    return str(path)
+    return str(path)

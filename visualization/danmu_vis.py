@@ -1,63 +1,51 @@
 """
-danmu_vis.py
+visualization/danmu_vis.py
+弹幕可视化
 
-
-修改时间：
-    2026-06-10
-----------------------------------
-功能：
-    弹幕可视化
-
-    1. plot_top_danmu     —— 高频弹幕词条柱状图（对标 plot_top_comments）
-    2. plot_danmu_density —— 弹幕时间轴密度分布图
+    1. plot_top_danmu       —— 高频弹幕词条柱状图
+    2. plot_danmu_density   —— 弹幕时间轴密度分布图
     3. plot_danmu_wordcloud —— 弹幕词云图
 
-技术：
-    - matplotlib
-    - wordcloud
-    - jieba（中文分词，用于词云）
-===============================
+输入数据（来自 fetch_danmu.fetch_danmu）：list[dict]，每项含
+    time(float, 出现时间秒) / type / size / color / timestamp / text
 
-输入数据格式（来自 fetch_danmu.fetch_danmu）：
-    list[dict]，每个 dict 包含：
-        "time"      : float  —— 弹幕出现时间（秒）
-        "type"      : int    —— 弹幕类型（1=滚动, 4=底部, 5=顶部 ...）
-        "size"      : int    —— 字号
-        "color"     : int    —— 颜色（十进制）
-        "timestamp" : int    —— 发送时间（Unix 时间戳）
-        "text"      : str    —— 弹幕内容
-===============================
+保存路径：data/processed/danmu/{uname}/{title}/{bv_id}/{time_str}/xxx.png
 
 修改时间：
-    2026-06-21
-----------------------------------
-修改内容：
-    1. 去掉所有 plt.show()（非交互后端下只会触发 UserWarning，没有实际作用）
-    2. "图片已保存" 改为 logger.debug
-    3. "弹幕列表为空"等跳过情况改为 logger.warning（终端要看到，否则会以为图生成了）
-===============================
+    2026-06-10  初版
+    2026-06-21  去掉 plt.show()；日志分级
+    2026-06-27  保存路径改为 bv_id / time_str 目录层级，新增 time_str 参数
 
 修改时间：
-    2026-06-27
+    2026-09-28
 ----------------------------------
-修改内容：
-    图片保存路径改为 data/processed/danmu/{uname}/{title}/{bv_id}/{time_str}/xxx.png
-    （bv_id 和时间作为目录层级，与项目其它产物路径风格统一）。
-    三个画图函数新增可选参数 time_str：由 crawler_pipeline 传入本次任务统一的
-    时间目录名，保证与同一次任务的其它产物落在同一个 {time_str}/ 目录；不传则内部生成。
-    注意：本文件里另有一个 _time_str(seconds) 函数，那是把"秒数"格式化成 mm:ss 用于
-    时间轴刻度的，与这里的 time_str 时间目录名是两回事，互不影响。
-===============================
+    1. 字体不再写死 SimHei / "simhei.ttf"，改为 utils.plot_utils 自动查找
+       （非 Windows 系统原来会方块字，词云直接报错）；同时保证使用 Agg 后端。
+    2. 词云加入停用词（与关键词提取共用），避免"哈哈哈""233"占满画面。
+    3. 弹幕全是表情/标点时 WordCloud 会抛 ValueError 让整个任务失败，现在跳过。
+    4. 删除 _time_str 兼容别名（没有任何地方引用）。
 
+修改时间：
+    2026-09-28（第二次）
+----------------------------------
+    1. 词云过滤掉不含文字的词：原来 "____"、"一一" 这类用户拿来当分隔线的符号
+       会通过"长度 > 1"的过滤，在词云里显示成一条条横线。
+    2. 词云改为只按空格切词，保留 jieba 的分词结果，不让 WordCloud 再按自己的规则切一遍。
+    3. 高频弹幕柱状图的标签截断到 _MAX_LABEL_LEN 个字：长弹幕会把左边距撑爆，
+       触发 "Tight layout not applied" 警告，图也会被挤变形。
 """
+
+import re
+from datetime import datetime
 
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import numpy as np
-from datetime import datetime
-from pathlib import Path
-from collections import Counter
+
+import config.config as cfg
+from utils.file_utils import video_dir
 from utils.log_utils import get_logger, log_event
+from utils.plot_utils import CJK_FONT_PATH
 
 logger = get_logger()
 
@@ -69,184 +57,141 @@ try:
 except ImportError:
     _WORDCLOUD_AVAILABLE = False
 
+_BILI_BLUE = "#23ADE5"
+_MAX_LABEL_LEN = 18   # 柱状图标签最长字数
 
-# ── 中文支持 ──────────────────────────────────────────────
-plt.rcParams['font.sans-serif'] = ['SimHei']
-plt.rcParams['axes.unicode_minus'] = False
+# 至少含一个汉字 / 字母 / 数字才算"词"
+_HAS_TEXT = re.compile(r"[\u4e00-\u9fffA-Za-z0-9]")
+# 只由"一"、下划线、空白组成的串，是用户画的分隔线，不是词
+_SEPARATOR = re.compile(r"[一_\s]+")
 
 
-# ── 工具函数 ──────────────────────────────────────────────
-def _make_save_dir(bv_id: str, video_info: tuple, time_str: str) -> Path:
-    """
-    根据 video_info / bv_id / time_str 构造保存目录（与 comment_vis.py 保持一致）
+def _is_word(w: str, stopwords) -> bool:
+    w = w.strip()
+    return (
+        len(w) > 1
+        and w not in stopwords
+        and _HAS_TEXT.search(w) is not None
+        and _SEPARATOR.fullmatch(w) is None
+    )
 
-    video_info[0] = UID
-    video_info[1] = uname
-    video_info[2] = title
 
-    路径: data/processed/danmu/{uname}/{title}/{bv_id}/{time_str}/
-    """
-    uname = video_info[1]
-    title = video_info[2]
-    save_dir = Path(f"data/processed/danmu/{uname}/{title}/{bv_id}/{time_str}")
-    save_dir.mkdir(parents=True, exist_ok=True)
-    return save_dir
+def _short(text: str) -> str:
+    return text if len(text) <= _MAX_LABEL_LEN else text[:_MAX_LABEL_LEN] + "…"
+
+
+def _save_path(bv_id: str, video_info: list, time_str: str | None, filename: str):
+    time_str = time_str or datetime.now().strftime("%Y%m%d_%H%M%S")
+    return video_dir(cfg.PROCESSED_DANMU_DIR, video_info, bv_id, time_str) / filename
 
 
 def _fmt_time(seconds: float) -> str:
-    """将秒数格式化为 mm:ss，用于时间轴刻度"""
-    m = int(seconds) // 60
-    s = int(seconds) % 60
+    """秒数 -> mm:ss，用于时间轴刻度"""
+    m, s = divmod(int(seconds), 60)
     return f"{m:02d}:{s:02d}"
 
 
-# 兼容旧名称：原文件里这个函数叫 _time_str，保留别名以防别处引用
-_time_str = _fmt_time
-
-
 # ── 1. 高频弹幕词条柱状图 ──────────────────────────────────
-def plot_top_danmu(top_danmu: list[tuple], bv_id: str, video_info: tuple,
+def plot_top_danmu(top_danmu: list[tuple], bv_id: str, video_info: list,
                    time_str: str | None = None):
-    """
-    绘制高频弹幕词条水平柱状图。
+    """top_danmu: [(弹幕文本, 出现次数), ...]，按次数降序"""
+    if not top_danmu:
+        logger.warning("没有高频弹幕数据，跳过柱状图绘制")
+        return
 
-    参数：
-        top_danmu  : [(弹幕文本, 出现次数), ...]，按次数降序排列
-        bv_id      : 视频BV号
-        video_info : (UID, uname, title)
-        time_str   : 本次任务统一的时间目录名；不传则内部生成
-    """
-    texts  = [x[0] for x in top_danmu]
+    texts = [_short(x[0]) for x in top_danmu]
     counts = [x[1] for x in top_danmu]
 
-    plt.figure(figsize=(10, 5))
-    plt.barh(texts, counts, color="#23ADE5")  # B站蓝
-    plt.xlabel("出现次数")
-    plt.title(f"{bv_id} 高频弹幕词条")
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.barh(texts, counts, color=_BILI_BLUE)
+    ax.set_xlabel("出现次数")
+    ax.set_title(f"{bv_id} 高频弹幕词条")
+    ax.invert_yaxis()
+    fig.tight_layout()
 
-    plt.gca().invert_yaxis()
-    plt.tight_layout()
-
-    time_str  = time_str or datetime.now().strftime("%Y%m%d_%H%M%S")
-    save_dir  = _make_save_dir(bv_id, video_info, time_str)
-    save_path = save_dir / "top_danmu.png"
-
-    plt.savefig(save_path, dpi=150)
-    plt.close()
-
-    logger.debug(f"图片已保存: {save_path}")
-    log_event("top_danmu_plot_saved", bv_id=bv_id, path=str(save_path))
+    path = _save_path(bv_id, video_info, time_str, "top_danmu.png")
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    logger.debug(f"图片已保存: {path}")
+    log_event("top_danmu_plot_saved", bv_id=bv_id, path=str(path))
 
 
 # ── 2. 弹幕时间轴密度分布图 ───────────────────────────────
-def plot_danmu_density(
-    danmus: list[dict],
-    bv_id: str,
-    video_info: tuple,
-    bin_seconds: int = 30,
-    time_str: str | None = None,
-):
-    """
-    绘制弹幕随视频进度的密度折线图。
-
-    参数：
-        danmus      : fetch_danmu 返回的弹幕列表
-        bv_id       : 视频BV号
-        video_info  : (UID, uname, title)
-        bin_seconds : 每个时间段的长度（秒），默认 30 秒一格
-        time_str    : 本次任务统一的时间目录名；不传则内部生成
-    """
+def plot_danmu_density(danmus: list[dict], bv_id: str, video_info: list,
+                       bin_seconds: int = 30, time_str: str | None = None):
+    """按 bin_seconds 分桶统计弹幕随视频进度的数量"""
     if not danmus:
         logger.warning("弹幕列表为空，跳过密度图绘制")
         return
 
     times = [d["time"] for d in danmus]
-    max_time = max(times)
-
-    # 按 bin_seconds 分桶统计
-    bins = np.arange(0, max_time + bin_seconds, bin_seconds)
+    bins = np.arange(0, max(times) + bin_seconds, bin_seconds)
     counts, edges = np.histogram(times, bins=bins)
-    centers = (edges[:-1] + edges[1:]) / 2  # 每个桶的中点（秒）
+    centers = (edges[:-1] + edges[1:]) / 2
 
     fig, ax = plt.subplots(figsize=(12, 4))
-
-    ax.fill_between(centers, counts, alpha=0.25, color="#23ADE5")
-    ax.plot(centers, counts, color="#23ADE5", linewidth=1.5)
-
+    ax.fill_between(centers, counts, alpha=0.25, color=_BILI_BLUE)
+    ax.plot(centers, counts, color=_BILI_BLUE, linewidth=1.5)
     ax.set_xlabel("视频进度")
     ax.set_ylabel(f"弹幕数量 / {bin_seconds}s")
     ax.set_title(f"{bv_id} 弹幕时间轴密度分布")
+    ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: _fmt_time(x)))
+    plt.setp(ax.get_xticklabels(), rotation=45)
+    fig.tight_layout()
 
-    # X 轴刻度转为 mm:ss
-    ax.xaxis.set_major_formatter(
-        ticker.FuncFormatter(lambda x, _: _fmt_time(x))
-    )
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-
-    time_str  = time_str or datetime.now().strftime("%Y%m%d_%H%M%S")
-    save_dir  = _make_save_dir(bv_id, video_info, time_str)
-    save_path = save_dir / "danmu_density.png"
-
-    plt.savefig(save_path, dpi=150)
+    path = _save_path(bv_id, video_info, time_str, "danmu_density.png")
+    fig.savefig(path, dpi=150)
     plt.close(fig)
-
-    logger.debug(f"图片已保存: {save_path}")
-    log_event("danmu_density_plot_saved", bv_id=bv_id, path=str(save_path))
+    logger.debug(f"图片已保存: {path}")
+    log_event("danmu_density_plot_saved", bv_id=bv_id, path=str(path))
 
 
 # ── 3. 弹幕词云图 ─────────────────────────────────────────
-def plot_danmu_wordcloud(
-    danmus: list[dict],
-    bv_id: str,
-    video_info: tuple,
-    font_path: str = "simhei.ttf",
-    time_str: str | None = None,
-):
-    """
-    绘制弹幕词云图（需要安装 wordcloud 和 jieba）。
-
-    参数：
-        danmus     : fetch_danmu 返回的弹幕列表
-        bv_id      : 视频BV号
-        video_info : (UID, uname, title)
-        font_path  : 中文字体路径，默认 simhei.ttf
-        time_str   : 本次任务统一的时间目录名；不传则内部生成
-    """
+def plot_danmu_wordcloud(danmus: list[dict], bv_id: str, video_info: list,
+                         time_str: str | None = None):
+    """jieba 分词后生成词云（需要 wordcloud + jieba + 系统中文字体）"""
     if not _WORDCLOUD_AVAILABLE:
         logger.warning("词云功能需要安装依赖：pip install wordcloud jieba")
         return
-
+    if not CJK_FONT_PATH:
+        logger.warning("系统中没有可用的中文字体，跳过词云绘制")
+        return
     if not danmus:
         logger.warning("弹幕列表为空，跳过词云绘制")
         return
 
-    # 拼接所有弹幕文本，jieba 分词
+    # 延迟 import：analyzer 层 import 了 jieba.analyse，放顶部会拖慢启动
+    from analyzer.keyword_extractor import load_stopwords
+    stopwords = load_stopwords(cfg.STOPWORDS_FILE)
+
     all_text = " ".join(d["text"] for d in danmus if d.get("text"))
-    seg_text = " ".join(jieba.cut(all_text))
+    words = [w.strip() for w in jieba.cut(all_text) if _is_word(w, stopwords)]
+    if not words:
+        logger.warning("弹幕分词后没有有效词语，跳过词云绘制")
+        return
 
-    wc = WordCloud(
-        font_path=font_path,
-        width=900,
-        height=500,
-        background_color="white",
-        colormap="Blues",
-        max_words=150,
-        collocations=False,   # 避免重复词组
-    ).generate(seg_text)
+    try:
+        wc = WordCloud(
+            font_path=CJK_FONT_PATH,
+            width=900, height=500,
+            background_color="white",
+            colormap="Blues",
+            max_words=150,
+            collocations=False,
+            regexp=r"\S+",   # 按空格切，保留 jieba 的分词结果
+        ).generate(" ".join(words))
+    except ValueError as e:
+        logger.warning(f"词云生成失败，跳过: {e}")
+        return
 
-    plt.figure(figsize=(12, 6))
-    plt.imshow(wc, interpolation="bilinear")
-    plt.axis("off")
-    plt.title(f"{bv_id} 弹幕词云")
-    plt.tight_layout()
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.imshow(wc, interpolation="bilinear")
+    ax.axis("off")
+    ax.set_title(f"{bv_id} 弹幕词云")
+    fig.tight_layout()
 
-    time_str  = time_str or datetime.now().strftime("%Y%m%d_%H%M%S")
-    save_dir  = _make_save_dir(bv_id, video_info, time_str)
-    save_path = save_dir / "danmu_wordcloud.png"
-
-    plt.savefig(save_path, dpi=150)
-    plt.close()
-
-    logger.debug(f"图片已保存: {save_path}")
-    log_event("danmu_wordcloud_plot_saved", bv_id=bv_id, path=str(save_path))
+    path = _save_path(bv_id, video_info, time_str, "danmu_wordcloud.png")
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    logger.debug(f"图片已保存: {path}")
+    log_event("danmu_wordcloud_plot_saved", bv_id=bv_id, path=str(path))

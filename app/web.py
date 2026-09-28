@@ -1,11 +1,4 @@
 # -*- coding: utf-8 -*-
-
-import os as _os
-_os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
-_os.environ["HF_HUB_OFFLINE"] = "1"
-_os.environ["TRANSFORMERS_OFFLINE"] = "1"
-
-
 """
 app/web.py
 
@@ -20,7 +13,24 @@ app/web.py
         （正在爬评论 3000 条 / 正在情绪分析 / 正在话题聚类 …）
       - 跑完后轮询结果里 ok=True，前端显示完成、可跳详情页
     其余接口（/api/history、/api/history/<bv>、/api/image/...）不变。
+
+修改时间：
+    2026-09-28
+----------------------------------
+    1. HF 环境变量改为 import config.hf_setup（原来这里写死强制离线，
+       config.HF_OFFLINE 改了也没用）。
+    2. 启动时检查登录态，没有就先弹浏览器登录，再启动网页服务。
+    3. 前端把标题、UP 主名、话题关键词等插入页面前先做 HTML 转义。
+       这些内容来自 B 站标题和用户评论，原来直接拼进 innerHTML，
+       带 < > 的标题会把页面结构打乱，恶意内容还能执行脚本。
+    4. /api/history/<bv_id> 和 /video/<bv_id> 校验 BV 号格式
+       （原来 bv_id 直接拼进 glob，传 * 会匹配到任意视频）。
+    5. 历史列表的标题 / UP 主名从 history.json 读取原始值
+       （目录名是经过非法字符替换的，可能和原标题不一样）。
+    6. 弹幕图片目录改从 config 读取。
 """
+
+import config.hf_setup  # noqa: F401  必须在任何可能间接 import transformers 的模块之前
 
 import re
 import json
@@ -32,12 +42,18 @@ from utils.log_utils import setup_logging, log_event
 logger = setup_logging()
 
 class _DropRequestLog(logging.Filter):
-    def filter(self, record):
-        msg = record.getMessage()
-        # werkzeug 请求日志格式形如：127.0.0.1 - - [..] "GET /xxx HTTP/1.1" 200 -
-        # 命中这种就丢弃（返回 False），其余放行
-        return not ('"GET ' in msg or '"POST ' in msg or '"HEAD ' in msg)
+    """
+    丢弃 werkzeug 的逐条请求日志，保留启动横幅等其它日志。
+    werkzeug 对非 200 的请求（304/404 等）会给请求行加 ANSI 颜色码，
+    消息形如 "\x1b[36mGET /xxx HTTP/1.1\x1b[0m" 304 -，
+    所以先去掉颜色码再判断，否则 304/404 的日志会漏出来。
+    """
+    _ANSI = re.compile(r"\x1b\[[0-9;]*m")
+    _REQUEST_LINE = re.compile(r'"(GET|POST|HEAD|PUT|DELETE|OPTIONS) ')
 
+    def filter(self, record):
+        msg = self._ANSI.sub("", record.getMessage())
+        return not self._REQUEST_LINE.search(msg)
 logging.getLogger("werkzeug").addFilter(_DropRequestLog())
 
 import config.config as cfg
@@ -79,7 +95,7 @@ def _analysis_bv_dir(bv_id: str):
 
 
 def _processed_danmu_bv_dir(bv_id: str):
-    base = Path("data/processed/danmu")
+    base = Path(cfg.PROCESSED_DANMU_DIR)
     if not base.exists():
         return None
     m = list(base.glob(f"*/*/{bv_id}"))
@@ -168,6 +184,8 @@ def index():
   <div id="history" style="margin-top:12px"></div>
 
 <script>
+// 转义后再插入 innerHTML：标题、昵称来自 B 站，不能直接当 HTML 用
+function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 // 阶段 -> 进度条百分比（粗略，给用户一个推进感）
 const STAGE_PCT = {
   queued:5, crawl_comments:25, crawl_danmu:45, visualize:55,
@@ -258,13 +276,13 @@ async function loadQueue(){
   let html='';
   if(running){
     html += `<div style="padding:8px 12px;background:#e8f7fd;border-left:3px solid #00a1d6;border-radius:6px;margin-bottom:6px;font-size:13px">
-      🔄 <b>正在处理</b>：${running.bv_id} —— ${running.stage_text}</div>`;
+      🔄 <b>正在处理</b>：${esc(running.bv_id)} —— ${esc(running.stage_text)}</div>`;
   }
   waiting.forEach((w,i)=>{
     // 每条排队项末尾加一个 × 按钮，点击可单独移除该排队任务
     html += `<div style="display:flex;align-items:center;justify-content:space-between;
         padding:6px 12px;background:#f7f7f7;border-radius:6px;margin-bottom:4px;font-size:13px;color:#666">
-      <span>⏳ 排队第 ${i+1} 位：${w.bv_id}</span>
+      <span>⏳ 排队第 ${i+1} 位：${esc(w.bv_id)}</span>
       <span onclick="cancelOne('${w.task_id}')" title="移除该排队任务"
             style="cursor:pointer;color:#f08080;font-weight:bold;padding:0 6px;font-size:16px">×</span>
     </div>`;
@@ -300,8 +318,8 @@ async function loadHistory(){
   if(!data.items||!data.items.length){box.innerHTML='<p style="color:#888">暂无历史记录</p>';return;}
   box.innerHTML=data.items.map(it=>
     `<a class="hist-item" href="/video/${it.bv_id}">
-       <div class="t">${it.title}</div>
-       <div class="m">${it.uname} · ${it.bv_id} · 共 ${it.point_count} 次抓取</div></a>`).join('');
+       <div class="t">${esc(it.title)}</div>
+       <div class="m">${esc(it.uname)} · ${esc(it.bv_id)} · 共 ${it.point_count} 次抓取</div></a>`).join('');
 }
 loadHistory();
 loadQueue();
@@ -317,6 +335,8 @@ setInterval(loadQueue, 2000);
 
 @app.route("/video/<bv_id>")
 def video_detail_page(bv_id):
+    if not _BV_ID_PATTERN.match(bv_id):
+        abort(404)
     return """
 <!DOCTYPE html>
 <html lang="zh-CN">
@@ -347,14 +367,15 @@ def video_detail_page(bv_id):
   <a class="back" href="/">← 返回列表</a>
   <div id="content" style="margin-top:16px">加载中...</div>
 <script>
+function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 const bvId=location.pathname.split('/').pop();
 function sentiHtml(s){if(!s)return '<span class="empty">无情绪数据</span>';
   const p=s['正向']||0,n=s['中性']||0,g=s['负向']||0;
   return `<div class="senti"><span class="pos">正向 ${p}</span><span class="neu">中性 ${n}</span><span class="neg">负向 ${g}</span></div>`;}
 function warnHtml(ws){if(!ws||!ws.length)return '<p class="empty">未检测到预警</p>';
-  return ws.map(w=>`<div class="warn ${w.level}">${w.message}</div>`).join('');}
+  return ws.map(w=>`<div class="warn ${esc(w.level)}">${esc(w.message)}</div>`).join('');}
 function topicHtml(tr){if(!tr||!tr.topics||!tr.topics.length)return '<p class="empty">无话题数据（评论太少或未启用 BERTopic）</p>';
-  return tr.topics.map(t=>`<div class="topic"><span class="kw">${(t.keywords||[]).slice(0,8).join(' / ')}</span><span style="color:#888">（${t.size} 条）</span></div>`).join('');}
+  return tr.topics.map(t=>`<div class="topic"><span class="kw">${esc((t.keywords||[]).slice(0,8).join(' / '))}</span><span style="color:#888">（${t.size} 条）</span></div>`).join('');}
 function historyTable(records){if(!records||!records.length)return '<p class="empty">无历史记录</p>';
   const rows=records.map(r=>{const st=r.stat||{};
     return `<tr><td>${r.crawl_time}</td><td>${st.view||0}</td><td>${st.like||0}</td><td>${st.coin||0}</td><td>${st.favorite||0}</td><td>${st.reply||0}</td></tr>`;}).join('');
@@ -363,11 +384,11 @@ function figHtml(kind,label){return `<img class="fig" src="/api/image/${bvId}/${
 async function load(){
   const res=await fetch('/api/history/'+bvId); const data=await res.json();
   const box=document.getElementById('content');
-  if(!res.ok){box.innerHTML='<p>出错了：'+data.error+'</p>';return;}
+  if(!res.ok){box.innerHTML='<p>出错了：'+esc(data.error)+'</p>';return;}
   const h=data.history||{}; const records=h.records||[]; const latest=records.length?records[records.length-1]:{};
   box.innerHTML=`
-    <h2>${h.title||bvId}</h2>
-    <div class="meta">${h.uname||''} · ${bvId} · 共 ${records.length} 次抓取</div>
+    <h2>${esc(h.title||bvId)}</h2>
+    <div class="meta">${esc(h.uname)} · ${esc(bvId)} · 共 ${records.length} 次抓取</div>
     <div class="card"><h3>😊 最近一次情绪分布</h3>${sentiHtml(latest.sentiment_summary)}</div>
     <div class="card"><h3>📈 数据趋势</h3>${figHtml('trend','数据趋势图')}</div>
     <div class="card"><h3>☁️ 弹幕词云</h3>${figHtml('wordcloud','弹幕词云')}</div>
@@ -435,7 +456,9 @@ def history_list():
     items = []
     for bv_id, uname, title, hf in _find_history_files():
         history = _load_json(hf) or {}
-        items.append({"bv_id": bv_id, "uname": uname, "title": title,
+        items.append({"bv_id": bv_id,
+                      "uname": history.get("uname") or uname,
+                      "title": history.get("title") or title,
                       "point_count": len(history.get("records", [])),
                       "history_path": str(hf)})
     items.sort(key=lambda x: x["point_count"], reverse=True)
@@ -444,6 +467,8 @@ def history_list():
 
 @app.route("/api/history/<bv_id>")
 def history_detail(bv_id: str):
+    if not _BV_ID_PATTERN.match(bv_id):
+        return _error_response(f"BV 号格式不正确: {bv_id}")
     matches = list(Path(cfg.ANALYSIS_DIR).glob(f"*/*/{bv_id}/{cfg.HISTORY_FILENAME_SUFFIX}"))
     if not matches:
         return _error_response(f"未找到该视频的历史记录: {bv_id}", status=404)
@@ -482,6 +507,12 @@ def get_image(bv_id: str, kind: str):
 
 
 if __name__ == "__main__":
+    # 首次运行先完成登录（弹出可见浏览器，终端按回车确认），再启动服务。
+    # 放在这里而不是爬虫里：爬虫跑在后台线程，在那里等终端输入网页上看不出来。
+    from crawler.bilibili_state import has_login_state, save_login_state
+    if not has_login_state():
+        save_login_state()
+
     # 注意：debug=True 的自动重载会重启进程，导致正在跑的后台任务中断。
     # 正式使用时建议 debug=False；调试期间知道这点即可。
     app.run(debug=False, host="127.0.0.1", port=5000)

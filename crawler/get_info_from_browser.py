@@ -1,26 +1,11 @@
 """
-    get_info_from_browser.py
+    crawler/get_info_from_browser.py
+    获取视频元信息（UP 主 UID / 昵称 / 标题 / cid）与统计数据 stat
 
     修改时间：
-        2026-04-21
-
-    主要修改内容：
-    从浏览器中使用playerwright技术获取视频,up主,cid等信息
-
-    2026-06-21 修改：
-    把同一次 /x/web-interface/view 请求里的 stat 字段
-    （view/danmaku/reply/favorite/coin/share/like 等）写入
-    config.CURRENT_VIDEO_STAT，不需要再额外发一次请求。
-
-    2026-06-22 修改（第二阶段重构）：
-    把 stat 写全局变量这件事改成显式返回值。get_video_info() 现在返回
-    (video_info, stat) 两个值，调用方（crawler_pipeline）接住后放进 task
-    字典往下传，不再依赖 config 全局变量。
-    video_info 本身的结构 [UID, uname, title] 完全不变，
-    仍可用 video_info[0]/[1]/[2] 索引，向后兼容旧的调用方式。
-    为兼容只想要 video_info、不关心 stat 的旧调用代码，
-    cfg.CURRENT_VIDEO_STAT 这一处全局变量写入暂时保留，不强制删除，
-    但新代码请优先使用返回值里的 stat，不要依赖这个全局变量。
+        2026-04-21  用 Playwright 获取视频、UP 主、cid 等信息
+        2026-06-21  顺带返回同一次 view 请求里的 stat 字段
+        2026-06-22  get_video_info() 改为返回 (video_info, stat)，不再依赖全局变量
 ===============================
     2026-09-28 修改（解决 HTTP 412 风控导致任务失败）：
     问题：
@@ -41,6 +26,10 @@
 
     缓存有效期 _CACHE_TTL 秒，过期后重新获取，避免拿到过时的 stat 数据。
     视频不存在（-404 等）直接抛 BiliNotFoundError，不做兜底。
+===============================
+    2026-09-28 清理：
+        删除对 cfg.CURRENT_VIDEO_STAT 的全局变量写入（已无读取方，config 中也已删除）；
+        浏览器兜底改为使用 config.HEADLESS。
 ===============================
 """
 
@@ -133,7 +122,7 @@ def _fetch_via_browser(bv_id: str) -> dict:
     storage = cfg.STORAGE_PATH if os.path.exists(cfg.STORAGE_PATH) else None
 
     with sync_playwright() as p:
-        browser = launch_browser(p, headless=True)
+        browser = launch_browser(p)
         try:
             context = browser.new_context(
                 storage_state=storage,
@@ -218,11 +207,6 @@ def get_video_info(bv_id) -> tuple[list, dict]:
     raw_stat = video_data.get("stat") or {}
     stat = {k: raw_stat.get(k, 0) for k in _STAT_KEYS}
 
-    # 兼容旧代码：仍顺手写一份到全局变量。
-    # 新代码（如 crawler_pipeline）应优先使用返回值里的 stat，
-    # 不要依赖这个全局变量——并发场景下它可能被后到的请求覆盖。
-    cfg.CURRENT_VIDEO_STAT = stat
-
     log_event("video_info_fetched", bv_id=bv_id, source=source)
     return video_info, stat
 
@@ -240,4 +224,4 @@ def get_cid(bv_id: str) -> int:
         raise BiliRequestError(f"视频信息中没有 cid（bv_id={bv_id}）")
 
     logger.debug(f"获取到 cid: {cid}（来源: {source}）")
-    return cid
+    return cid

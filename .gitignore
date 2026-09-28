@@ -11,12 +11,11 @@ __pycache__/
 logs/
 *.log
 
-# Data（彻底忽略所有内容）
-data/**
-!data/**/.gitkeep
+# Data（运行产物，程序会自动创建目录）
+data/
 
-# bilibili_state（无论是文件还是目录，无论出现在哪个层级）
-**/bilibili_state/
+# 登录态（含 B 站 Cookie，绝对不能提交）
+bilibili_data/
 **/bilibili_state.json
 
 # OS
@@ -149,4 +148,4 @@ cython_debug/
 # Marimo
 marimo/_static/
 marimo/_lsp/
-__marimo__/
+__marimo__/

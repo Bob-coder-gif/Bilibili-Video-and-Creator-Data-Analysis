@@ -13,7 +13,8 @@ B 站接口请求工具：统一处理 UA/Cookie、状态码检查、风控识�
 异常层级：
     BiliRequestError            通用请求失败
     ├── BiliRiskControlError    被风控拦截（HTTP 412 / 业务码 -412、-352）
-    └── BiliNotFoundError       视频不存在或不可见（业务码 -404、62002、62004）
+    ├── BiliNotFoundError       视频不存在或不可见（业务码 -404、62002、62004）
+    └── BiliLoginRequiredError  本地没有登录态文件（2026-09-28 新增）
 """
 import json
 import os
@@ -42,6 +43,10 @@ class BiliRiskControlError(BiliRequestError):
 
 class BiliNotFoundError(BiliRequestError):
     """视频不存在、已删除、不可见或审核中"""
+
+
+class BiliLoginRequiredError(BiliRequestError):
+    """本地没有 B 站登录态，需要先登录"""
 
 
 USER_AGENT = (
@@ -169,4 +174,4 @@ def bili_get_json(url, params=None, headers=None, cookies=None,
             f"开头: {resp.text[:100]!r}",
             status=resp.status_code,
         )
-    return parse_bili_body(body, url)
+    return parse_bili_body(body, url)

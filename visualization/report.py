@@ -12,6 +12,14 @@ visualization/report.py
     generate_report 新增可选参数 time_str，透传给 save_report，
     保证 report.json 与同一次任务的其它产物落在同一个 {time_str}/ 目录下。
     不传时由 save_report 内部自行生成（向后兼容）。
+
+修改时间：
+    2026-09-28
+-----------------------------
+    1. 修复 danmaku_timeline 的 video_sec 全为 0：弹幕时间单位是秒，
+       原来按毫秒处理又 //1000。loader 现在直接给出秒数（float）。
+    2. 删除 snownlp_score 候选列（SnowNLP 后端已移除）。
+    3. summary 新增 reply_total（评论总数现在包含楼中楼回复）。
 """
 
 from __future__ import annotations
@@ -52,20 +60,19 @@ def _time_trend(df: pd.DataFrame, label_col: str) -> list[dict]:
 
 
 def _danmaku_timeline(df: pd.DataFrame) -> list[dict]:
-    """弹幕情绪时间轴，返回 [{"video_sec": int, "score": float, "text": str}, ...]（最多 2000 条）"""
-    score_col_candidates = ["snownlp_score", "bert_score"]
-    if df.empty or "video_time" not in df.columns:
+    """
+    弹幕情绪时间轴（按视频进度排序，最多 2000 条）
+    返回 [{"video_sec": int, "score": float(正向概率), "text": str}, ...]
+    """
+    cols = ["video_time", "bert_score", "text_clean"]
+    if df.empty or any(c not in df.columns for c in cols):
         return []
 
-    sc_col = next((c for c in score_col_candidates if c in df.columns), None)
-    if not sc_col:
-        return []
-
-    pts = df[["video_time", sc_col, "text_clean"]].dropna().head(2000)
+    pts = df[cols].dropna().sort_values("video_time").head(2000)
     return [
         {
-            "video_sec": int(row["video_time"]) // 1000,
-            "score": round(float(row[sc_col]), 3),
+            "video_sec": int(row["video_time"]),
+            "score": round(float(row["bert_score"]), 3),
             "text": str(row["text_clean"])[:50],
         }
         for _, row in pts.iterrows()
@@ -74,7 +81,7 @@ def _danmaku_timeline(df: pd.DataFrame) -> list[dict]:
 
 def _top_comments(df: pd.DataFrame, label_col: str, top_n: int = 10) -> list[dict]:
     """高赞评论 Top N"""
-    if df.empty or "like" not in df.columns:
+    if df.empty or "like" not in df.columns or label_col not in df.columns:
         return []
 
     top = df.nlargest(top_n, "like")[["text_clean", "like", label_col]].fillna("")
@@ -98,7 +105,9 @@ def build_report_data(
 
     return {
         "summary": {
-            "comment_total": len(comments_df),
+            "comment_total": len(comments_df),   # 主评论 + 回复
+            "reply_total": int((comments_df["source"] == "reply").sum())
+                           if "source" in comments_df.columns else 0,
             "danmaku_total": len(danmaku_df),
             "comment_sentiment": _count_labels(comments_df, label_col),
             "danmaku_sentiment": _count_labels(danmaku_df, label_col),
@@ -138,4 +147,4 @@ def generate_report(
         comments_df, danmaku_df, label_col,
         keywords_all, keywords_pos, keywords_neg,
     )
-    return file_utils.save_report(report_data, bv_id, video_info, time_str=time_str)
+    return file_utils.save_report(report_data, bv_id, video_info, time_str=time_str)

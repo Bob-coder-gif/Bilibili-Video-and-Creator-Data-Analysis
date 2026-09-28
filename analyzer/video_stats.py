@@ -2,12 +2,15 @@
 analyzer/video_stats.py
 视频统计数据的保存、历史累积、趋势图生成
 
-路径结构调整：
-    - 带时间戳的快照: data/analysis/{uname}/{title}/{bv_id}/{time_str}/stats_analysis.json
-    - 跨次累积、每个视频只有一份的文件不带 time 这一层:
+路径：
+    - 本次快照: data/analysis/{uname}/{title}/{bv_id}/{time_str}/stats_analysis.json
+    - 跨次累积（每个视频一份，不带时间层）:
         历史记录: data/analysis/{uname}/{title}/{bv_id}/history.json
         趋势图:   data/analysis/{uname}/{title}/{bv_id}/trend.png
-    save_video_stats 新增可选参数 time_str（同一次任务统一时间目录用），不传则内部生成。
+
+2026-09-28 修改：
+    目录拼接改用 utils.file_utils.video_dir（统一处理标题非法字符）；
+    中文字体查找移到 utils.plot_utils，与弹幕图共用。
 """
 
 from __future__ import annotations
@@ -16,65 +19,24 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 import config.config as cfg
+from utils.file_utils import video_dir
 from utils.log_utils import get_logger, log_event
+import utils.plot_utils  # noqa: F401  设置 Agg 后端 + 中文字体
 
 logger = get_logger()
-
-plt.rcParams["axes.unicode_minus"] = False
-
-
-def _setup_cjk_font():
-    import matplotlib.font_manager as fm
-    candidates = [
-        "Noto Sans CJK SC", "Noto Sans CJK", "Noto Serif CJK SC",
-        "PingFang SC", "Microsoft YaHei", "SimHei", "WenQuanYi Zen Hei",
-        "Source Han Sans CN", "Droid Sans Fallback",
-    ]
-    available = {f.name for f in fm.fontManager.ttflist}
-    for name in candidates:
-        if name in available:
-            plt.rcParams["font.sans-serif"] = [name]
-            return name
-    for f in fm.fontManager.ttflist:
-        if any(k in f.fname for k in ("CJK", "CN", "SC", "noto")):
-            plt.rcParams["font.sans-serif"] = [f.name]
-            return f.name
-    logger.warning("未找到中文字体，图表中文可能显示为方块")
-    return None
-
-
-_setup_cjk_font()
 
 
 # ------------------------------------------------------------------ paths --
 
-def _bv_dir(uname: str, title: str, bv_id: str) -> Path:
-    """该视频的根目录 data/analysis/{uname}/{title}/{bv_id}/ （history/trend 放这里）"""
-    d = Path(cfg.ANALYSIS_DIR) / uname / title / bv_id
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def _snapshot_dir(uname: str, title: str, bv_id: str, time_str: str) -> Path:
-    """本次快照目录 .../{bv_id}/{time_str}/ （带时间戳的产物放这里）"""
-    d = _bv_dir(uname, title, bv_id) / time_str
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def _history_path(uname: str, title: str, bv_id: str) -> Path:
-    # 跨次累积，不带 time
-    return _bv_dir(uname, title, bv_id) / cfg.HISTORY_FILENAME_SUFFIX
+def history_file(uname: str, title: str, bv_id: str) -> Path:
+    return video_dir(cfg.ANALYSIS_DIR, [None, uname, title], bv_id) / cfg.HISTORY_FILENAME_SUFFIX
 
 
 def _trend_image_path(uname: str, title: str, bv_id: str) -> Path:
-    # 跨次累积，不带 time
-    return _bv_dir(uname, title, bv_id) / "trend.png"
+    return video_dir(cfg.ANALYSIS_DIR, [None, uname, title], bv_id) / "trend.png"
 
 
 # ------------------------------------------------------------------ core ---
@@ -91,7 +53,7 @@ def save_video_stats(bv_id: str, video_info: list, stat: dict, time_str: str | N
     full_stat = {field: int(stat.get(field, 0) or 0) for field in cfg.VIDEO_STAT_FIELDS}
 
     # ---------- 1. 保存本次快照（带时间目录）----------
-    snap_dir = _snapshot_dir(uname, title, bv_id, time_str)
+    snap_dir = video_dir(cfg.ANALYSIS_DIR, video_info, bv_id, time_str)
     snapshot = {
         "bv_id": bv_id, "uid": uid, "uname": uname, "title": title,
         "crawl_time": now.strftime("%Y-%m-%d %H:%M:%S"),
@@ -103,7 +65,7 @@ def save_video_stats(bv_id: str, video_info: list, stat: dict, time_str: str | N
     logger.debug(f"[video_stats] 快照已保存: {snapshot_path}")
 
     # ---------- 2. 追加进历史记录（不带时间目录）----------
-    history_path = _history_path(uname, title, bv_id)
+    history_path = history_file(uname, title, bv_id)
     history = _load_history(history_path)
     history["bv_id"] = bv_id
     history["uid"] = uid
@@ -194,5 +156,5 @@ def plot_trend(history: dict, uname: str, title: str, bv_id: str) -> Path:
 
 def get_history(bv_id: str, video_info: list) -> dict:
     uname, title = video_info[1], video_info[2]
-    path = _history_path(uname, title, bv_id)
-    return _load_history(path)
+    path = history_file(uname, title, bv_id)
+    return _load_history(path)

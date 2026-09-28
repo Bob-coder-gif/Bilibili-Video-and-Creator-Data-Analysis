@@ -2,11 +2,19 @@
 analyzer/topic_analyzer.py
 话题聚类分析 —— 基于 BERTopic
 
------------------------------
-路径结构调整：
-    话题结果带时间目录: data/topic/{uname}/{title}/{bv_id}/{time_str}/topics.json
-    save_topics / run_topic_analysis 新增可选参数 time_str。
+结果路径: data/topic/{uname}/{title}/{bv_id}/{time_str}/topics.json
+数据不足 / 未安装 BERTopic / 聚类出错时返回 None，不影响主流程。
 
+修改时间：
+    2026-09-28
+----------------------------------
+    1. 修复中文话题关键词是整句话的问题：BERTopic 默认的 CountVectorizer 按空格和
+       标点切词，中文没有空格，一整条评论会被当成一个"词"。现在改用 jieba 分词，
+       并去掉停用词。
+    2. min_topic_size 随评论数自适应（默认值 10 在几十条评论时几乎全部被判为离群点，
+       经常聚出 0 个话题）。
+    3. 目录拼接改用 utils.file_utils.video_dir（统一处理标题里的非法字符）。
+    4. 首次使用需要下载向量模型（受 config.HF_OFFLINE 控制），失败时日志里给出提示。
 """
 
 from __future__ import annotations
@@ -14,9 +22,10 @@ from __future__ import annotations
 import json
 from collections import Counter
 from datetime import datetime
-from pathlib import Path
 
+import config.hf_setup  # noqa: F401  必须在 import bertopic 之前
 import config.config as cfg
+from utils.file_utils import video_dir
 from utils.log_utils import get_logger, log_event
 
 logger = get_logger()
@@ -30,10 +39,19 @@ def _bertopic_available() -> bool:
         return False
 
 
-def _topic_dir(uname: str, title: str, bv_id: str, time_str: str) -> Path:
-    d = Path(cfg.TOPIC_DIR) / uname / title / bv_id / time_str
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+def _build_vectorizer():
+    """jieba 分词 + 停用词的 CountVectorizer，给 BERTopic 提取话题关键词用"""
+    import jieba
+    from sklearn.feature_extraction.text import CountVectorizer
+    from analyzer.keyword_extractor import load_stopwords
+
+    stopwords = load_stopwords(cfg.STOPWORDS_FILE)
+
+    def tokenize(text):
+        return [w for w in jieba.lcut(text) if len(w.strip()) > 1 and w not in stopwords]
+
+    # token_pattern=None：显式声明不用默认正则，避免 sklearn 警告
+    return CountVectorizer(tokenizer=tokenize, token_pattern=None, lowercase=False)
 
 
 def analyze_topics(texts: list[str], labels: list[str] | None = None) -> dict | None:
@@ -44,10 +62,7 @@ def analyze_topics(texts: list[str], labels: list[str] | None = None) -> dict | 
 
     doc_count = len(valid)
     if doc_count < cfg.TOPIC_MIN_DOCS:
-        logger.info(
-            f"ℹ️  评论数 {doc_count} 少于话题聚类所需的最小值 {cfg.TOPIC_MIN_DOCS}，"
-            f"跳过话题聚类（数据更多时会自动启用）"
-        )
+        logger.info(f"ℹ️  评论数 {doc_count} 少于话题聚类所需的最小值 {cfg.TOPIC_MIN_DOCS}，跳过话题聚类")
         log_event("topic_skipped_too_few_docs", doc_count=doc_count, min_required=cfg.TOPIC_MIN_DOCS)
         return None
 
@@ -60,64 +75,66 @@ def analyze_topics(texts: list[str], labels: list[str] | None = None) -> dict | 
     docs = [t for _, t in valid]
     doc_labels = [labels[i] for i, _ in valid] if labels is not None else None
 
-    logger.info(f"[topic] 开始话题聚类，共 {doc_count} 条文本（首次会下载模型，请耐心等待）")
-    nr_topics = cfg.TOPIC_NR if cfg.TOPIC_NR != "auto" else "auto"
+    logger.info(f"[topic] 开始话题聚类，共 {doc_count} 条文本")
+    min_topic_size = max(3, min(10, doc_count // 20))
 
     try:
-        topic_model = BERTopic(language="multilingual", nr_topics=nr_topics, verbose=False)
+        topic_model = BERTopic(
+            language="multilingual",
+            nr_topics=cfg.TOPIC_NR,
+            min_topic_size=min_topic_size,
+            vectorizer_model=_build_vectorizer(),
+            verbose=False,
+        )
         topic_ids, _ = topic_model.fit_transform(docs)
     except Exception as e:
-        logger.warning(f"[topic] 话题聚类执行失败，跳过: {type(e).__name__}: {e}")
+        hint = ""
+        if getattr(cfg, "HF_OFFLINE", True):
+            hint = "（如果是首次使用，可能是本地没有向量模型缓存：把 config.HF_OFFLINE 改为 False 跑一次下载）"
+        logger.warning(f"[topic] 话题聚类执行失败，跳过: {type(e).__name__}: {e}{hint}")
         log_event("topic_failed", error=f"{type(e).__name__}: {e}")
         return None
 
-    info = topic_model.get_topic_info()
     topics_out = []
-    for _, row in info.iterrows():
+    for _, row in topic_model.get_topic_info().iterrows():
         tid = int(row["Topic"])
-        if tid == -1:
+        if tid == -1:   # -1 是 BERTopic 的离群点
             continue
-        kw_pairs = topic_model.get_topic(tid) or []
-        keywords = [w for w, _ in kw_pairs[:10]]
+        keywords = [w for w, _ in (topic_model.get_topic(tid) or [])[:10]]
         member_idx = [i for i, t in enumerate(topic_ids) if t == tid]
-        size = len(member_idx)
         sentiment = None
         if doc_labels is not None:
-            cnt = Counter(doc_labels[i] for i in member_idx)
-            sentiment = {k: int(v) for k, v in cnt.items()}
-        examples = [docs[i] for i in member_idx[:3]]
+            sentiment = dict(Counter(doc_labels[i] for i in member_idx))
         topics_out.append({
-            "topic_id": tid, "keywords": keywords, "size": size,
-            "sentiment": sentiment, "examples": examples,
+            "topic_id": tid,
+            "keywords": keywords,
+            "size": len(member_idx),
+            "sentiment": sentiment,
+            "examples": [docs[i] for i in member_idx[:3]],
         })
 
     topics_out.sort(key=lambda t: t["size"], reverse=True)
-    result = {
-        "backend": "bertopic", "doc_count": doc_count,
-        "topic_count": len(topics_out), "topics": topics_out,
-    }
     logger.info(f"[topic] 话题聚类完成，共聚出 {len(topics_out)} 个话题")
     log_event("topic_done", doc_count=doc_count, topic_count=len(topics_out))
-    return result
+    return {
+        "backend": "bertopic",
+        "doc_count": doc_count,
+        "topic_count": len(topics_out),
+        "topics": topics_out,
+    }
 
 
 def save_topics(result: dict, bv_id: str, video_info: list, time_str: str | None = None) -> str:
-    """
-    话题结果落盘到 data/topic/{uname}/{title}/{bv_id}/{time_str}/topics.json
-    time_str 不传则内部生成。
-    """
-    uname, title = video_info[1], video_info[2]
+    """话题结果落盘到 data/topic/{uname}/{title}/{bv_id}/{time_str}/topics.json"""
     now = datetime.now()
     time_str = time_str or now.strftime("%Y%m%d_%H%M%S")
-
-    save_dir = _topic_dir(uname, title, bv_id, time_str)
-    path = save_dir / "topics.json"
+    path = video_dir(cfg.TOPIC_DIR, video_info, bv_id, time_str) / "topics.json"
 
     payload = {
-        "bv_id": bv_id, "uname": uname, "title": title,
+        "bv_id": bv_id, "uname": video_info[1], "title": video_info[2],
         "analyze_time": now.strftime("%Y-%m-%d %H:%M:%S"),
+        **result,
     }
-    payload.update(result)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
     logger.info(f"[topic] 话题结果已保存: {path}")
@@ -130,6 +147,5 @@ def run_topic_analysis(texts: list[str], bv_id: str, video_info: list,
     result = analyze_topics(texts, labels=labels)
     if result is None:
         return None
-    path = save_topics(result, bv_id, video_info, time_str=time_str)
-    result["topics_path"] = path
+    result["topics_path"] = save_topics(result, bv_id, video_info, time_str=time_str)
     return result

@@ -21,6 +21,10 @@ app/task_runner.py
 2026-09-28 修改：
     失败时按异常类型给前端返回准确原因。原来所有失败都显示
     "请确认 BV 号是否正确"，被风控时这个提示是误导性的。
+
+    新增"未登录"的单独提示（BiliLoginRequiredError）。
+    已结束的任务只保留最近 _MAX_FINISHED 个。原来任务表只增不减，
+    服务长时间运行时内存会一直涨，_count_ahead 也会越来越慢。
 """
 
 from __future__ import annotations
@@ -31,7 +35,9 @@ import traceback
 import uuid
 from datetime import datetime
 
-from utils.http_utils import BiliNotFoundError, BiliRiskControlError, BiliRequestError
+from utils.http_utils import (
+    BiliLoginRequiredError, BiliNotFoundError, BiliRiskControlError, BiliRequestError,
+)
 from utils.log_utils import get_logger, log_event
 
 logger = get_logger()
@@ -46,6 +52,9 @@ _worker_lock = threading.Lock()
 
 # worker 数量固定为 1：单路串行爬取，避免并发触发 B 站风控、避免资源争抢
 _NUM_WORKERS = 1
+
+# 已结束（成功 / 失败 / 取消）的任务最多保留多少个，供前端查询结果
+_MAX_FINISHED = 100
 
 
 # ---- 任务阶段常量（前端按这个显示文案）----
@@ -74,6 +83,7 @@ STAGE_TEXT = {
 # ---- 失败时给用户看的提示（按异常类型区分）----
 ERR_RISK_CONTROL = "触发 B 站风控（短时间请求过多），请过十几分钟到一小时后再试，或更换网络"
 ERR_NOT_FOUND = "视频不存在、已删除或不可见，请检查 BV 号是否正确"
+ERR_LOGIN = "未登录 B 站：请重启网页服务，在弹出的浏览器中登录后按回车"
 ERR_BILI_REQUEST = "请求 B 站接口失败，请稍后重试"
 ERR_UNKNOWN = "分析失败，请稍后重试（详细原因见日志）"
 
@@ -193,6 +203,14 @@ def clear_queue() -> dict:
     return {"ok": True, "cancelled": cancelled}
 
 
+def _prune_finished_locked():
+    """删除最早的已结束任务，只保留最近 _MAX_FINISHED 个。调用方需持有 _LOCK。"""
+    finished = [tid for tid in _ORDER if _TASKS.get(tid, {}).get("ok") is not None]
+    for tid in finished[:max(0, len(finished) - _MAX_FINISHED)]:
+        _ORDER.remove(tid)
+        _TASKS.pop(tid, None)
+
+
 def submit_task(bv_id: str) -> str:
     """提交一个分析任务：放进队列，立刻返回 task_id。真正的执行由后台 worker 串行处理。"""
     _ensure_worker()
@@ -211,6 +229,7 @@ def submit_task(bv_id: str) -> str:
             "result": None,
         }
         _ORDER.append(task_id)
+        _prune_finished_locked()
 
     _QUEUE.put(task_id)
     log_event("task_submitted", task_id=task_id, bv_id=bv_id)
@@ -248,11 +267,11 @@ def _worker_loop():
             with _LOCK:
                 t = _TASKS.get(task_id)
                 cancelled = (t is None) or (t.get("stage") == STAGE_CANCELLED)
+                bv_id = t.get("bv_id") if t else None
             if cancelled:
                 logger.debug(f"[task_runner] 任务 {task_id} 已取消，跳过执行")
                 continue
 
-            bv_id = _TASKS.get(task_id, {}).get("bv_id")
             if bv_id:
                 _run_one(task_id, bv_id)
         except Exception as e:
@@ -315,7 +334,9 @@ def _run_one(task_id: str, bv_id: str):
         _fail(task_id, bv_id, e, ERR_RISK_CONTROL, with_traceback=False)
     except BiliNotFoundError as e:
         _fail(task_id, bv_id, e, ERR_NOT_FOUND, with_traceback=False)
+    except BiliLoginRequiredError as e:
+        _fail(task_id, bv_id, e, ERR_LOGIN, with_traceback=False)
     except BiliRequestError as e:
         _fail(task_id, bv_id, e, ERR_BILI_REQUEST, with_traceback=True)
     except Exception as e:
-        _fail(task_id, bv_id, e, ERR_UNKNOWN, with_traceback=True)
+        _fail(task_id, bv_id, e, ERR_UNKNOWN, with_traceback=True)
