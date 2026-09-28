@@ -110,5 +110,5 @@ TOPIC_NR = "auto"       # 话题数: "auto" 自动合并，或填整数固定话
 #   False        ：允许联网，通过国内镜像 hf-mirror.com 下载模型。
 # 第一次使用（BERT 情绪模型、BERTopic 的向量模型都还没下载）时改成 False
 # 跑一次任务，下载完成后改回 True。
-# HF_OFFLINE = True
-HF_OFFLINE = False
+HF_OFFLINE = True
+#HF_OFFLINE = False
