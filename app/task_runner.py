@@ -17,6 +17,10 @@ app/task_runner.py
 局限（单机自用足够，但要知道）：
     - 任务状态 / 队列存在内存里，程序一重启就全部丢失（排队中和正在跑的都会中断）
     - 不适合多进程 / 多机部署；那种场景才需要 Redis + RQ
+
+2026-09-28 修改：
+    失败时按异常类型给前端返回准确原因。原来所有失败都显示
+    "请确认 BV 号是否正确"，被风控时这个提示是误导性的。
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ import traceback
 import uuid
 from datetime import datetime
 
+from utils.http_utils import BiliNotFoundError, BiliRiskControlError, BiliRequestError
 from utils.log_utils import get_logger, log_event
 
 logger = get_logger()
@@ -65,6 +70,12 @@ STAGE_TEXT = {
     STAGE_ERROR: "出错了",
     STAGE_CANCELLED: "已取消",
 }
+
+# ---- 失败时给用户看的提示（按异常类型区分）----
+ERR_RISK_CONTROL = "触发 B 站风控（短时间请求过多），请过十几分钟到一小时后再试，或更换网络"
+ERR_NOT_FOUND = "视频不存在、已删除或不可见，请检查 BV 号是否正确"
+ERR_BILI_REQUEST = "请求 B 站接口失败，请稍后重试"
+ERR_UNKNOWN = "分析失败，请稍后重试（详细原因见日志）"
 
 
 def _update(task_id: str, stage: str, message: str = "", **extra):
@@ -252,6 +263,23 @@ def _worker_loop():
             _QUEUE.task_done()
 
 
+def _fail(task_id: str, bv_id: str, exc: Exception, user_msg: str, with_traceback: bool):
+    """
+    统一的失败处理：日志记录真实原因，前端只显示给用户看的提示。
+
+    with_traceback：预期内的失败（风控、视频不存在）不需要打完整堆栈，
+    只有未知异常才打，避免日志被预期内的错误刷屏。
+    """
+    err = f"{type(exc).__name__}: {exc}"
+    if with_traceback:
+        logger.error(f"任务 {task_id} 失败: {err}\n{traceback.format_exc()}")
+    else:
+        logger.warning(f"任务 {task_id} 失败: {err}")
+    log_event("task_failed", task_id=task_id, bv_id=bv_id,
+              error=err, error_type=type(exc).__name__)
+    _update(task_id, STAGE_ERROR, message=user_msg, ok=False, error=user_msg)
+
+
 def _run_one(task_id: str, bv_id: str):
     """实际执行一个任务：依次跑三个 pipeline，全程更新进度"""
     # 延迟 import，避免循环依赖
@@ -282,9 +310,12 @@ def _run_one(task_id: str, bv_id: str):
         _update(task_id, STAGE_DONE, ok=True, result=result)
         log_event("task_done", task_id=task_id, bv_id=bv_id)
 
+    # 注意顺序：子类异常必须写在父类 BiliRequestError 之前，否则会被父类先捕获
+    except BiliRiskControlError as e:
+        _fail(task_id, bv_id, e, ERR_RISK_CONTROL, with_traceback=False)
+    except BiliNotFoundError as e:
+        _fail(task_id, bv_id, e, ERR_NOT_FOUND, with_traceback=False)
+    except BiliRequestError as e:
+        _fail(task_id, bv_id, e, ERR_BILI_REQUEST, with_traceback=True)
     except Exception as e:
-        err = f"{type(e).__name__}: {e}"
-        logger.error(f"任务 {task_id} 失败: {err}\n{traceback.format_exc()}")
-        log_event("task_failed", task_id=task_id, bv_id=bv_id, error=err)
-        _update(task_id, STAGE_ERROR, message="分析失败，请确认 BV 号或稍后重试",
-                ok=False, error="分析失败，请确认 BV 号是否正确，或稍后重试")
+        _fail(task_id, bv_id, e, ERR_UNKNOWN, with_traceback=True)

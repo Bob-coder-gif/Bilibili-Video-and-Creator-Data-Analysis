@@ -9,7 +9,7 @@ fetch_danmu.py
 bili弹幕存储结构说明：
     以xml形式存储
     url：https://api.bilibili.com/x/v1/dm/list.so?oid=<cid>
-    
+
 <i>
 <chatserver>chat.bilibili.com</chatserver>
 <chatid>739033648</chatid>
@@ -35,7 +35,7 @@ bili弹幕存储结构说明：
 | 第6位 | `0`             | 弹幕池      | 0 代表普通池  1 字幕池（通常不可见） 2 特殊池 |
 | 第7位 | `ef7be4b9`      | 用户Hash ID | 发送这条弹幕的用户的“代号”。 |
 | 第8位 | `2097...280`    | 数据库ID    | 这条弹幕在 B 站数据库里的唯一身份证号。 |
-| 第9位 | `10`            | 权重        | 这是一个内部标记，通常用于防刷屏或优先级排序。       
+| 第9位 | `10`            | 权重        | 这是一个内部标记，通常用于防刷屏或优先级排序。
 
 ===================================
 
@@ -59,71 +59,64 @@ bili弹幕存储结构说明：
 -----------------------------
 把 print 改为 logger.debug/info/warning，过程细节默认终端不显示
 
+修改时间：
+    2026-09-28（降低风控风险 + 失败不再静默）
+-----------------------------
+    1. get_cid 不再自己请求 view 接口，改为复用 get_info_from_browser 的共享缓存。
+       原来同一视频的 view 接口会被 get_video_info 和 get_cid 各请求一次。
+       get_cid 仍可从本模块导入（from crawler.fetch_danmu import get_cid），兼容旧调用。
+    2. 弹幕请求改走 utils.http_utils.bili_get：完整 UA + 登录 Cookie + 412 风控识别。
+    3. 失败时抛异常，不再返回空列表。原来风控期间会返回 []，任务"成功"但弹幕数为 0，
+       结果是错的却看不出来；现在由 task_runner 捕获并给出明确提示。
 """
 
-import requests
-import xml.etree.ElementTree as ET
 import time
 import random
+import xml.etree.ElementTree as ET
+
+from crawler.get_info_from_browser import get_cid   # 同时作为本模块的 get_cid 对外导出
+from utils.http_utils import bili_get, BiliRequestError
 from utils.log_utils import get_logger, log_event
 
 logger = get_logger()
 
-
-def get_cid(bv_id: str) -> int:
-    url = "https://api.bilibili.com/x/web-interface/view"
-    params = {"bvid": bv_id}
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Referer": "https://www.bilibili.com/"
-    }
-    try:
-        resp = requests.get(url, params=params, headers=headers)
-        data = resp.json()
-        cid = data["data"]["pages"][0]["cid"]
-        return cid
-    except Exception as e:
-        # 拿不到 cid 后面全流程没法跑，属于异常情况，终端要看到
-        logger.warning(f"获取 cid 失败: {e}")
-        return None
+DANMU_API = "https://api.bilibili.com/x/v1/dm/list.so"
 
 
 def parse_danmu(xml_text: str) -> list[dict]:
     """
     解析弹幕 XML
     （不再做 latin-1 -> utf-8 的二次转换，因为请求阶段已经强制用 utf-8 解码）
+
+    整个 XML 解析失败会抛 BiliRequestError；个别弹幕属性异常则跳过该条。
     """
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as e:
+        raise BiliRequestError(f"弹幕 XML 解析失败: {e}，内容开头: {xml_text[:100]!r}")
+
     danmus = []
     fail_count = 0
 
-    try:
-        root = ET.fromstring(xml_text)
-
-        for d in root.findall("d"):
-            try:
-                text = d.text
-                if text is None:
-                    continue
-
-                p = d.attrib.get("p", "").split(",")
-
-                danmu = {
-                    "time": float(p[0]),
-                    "type": int(p[1]),
-                    "size": int(p[2]),
-                    "color": int(p[3]),
-                    "timestamp": int(p[4]),
-                    "text": text,  # 已是正确的 utf-8 字符串，无需再转换
-                }
-
-                danmus.append(danmu)
-
-            except Exception as e:
-                fail_count += 1
+    for d in root.findall("d"):
+        try:
+            text = d.text
+            if text is None:
                 continue
 
-    except Exception as e:
-        logger.warning(f"解析 XML 失败: {e}")
+            p = d.attrib.get("p", "").split(",")
+
+            danmus.append({
+                "time": float(p[0]),
+                "type": int(p[1]),
+                "size": int(p[2]),
+                "color": int(p[3]),
+                "timestamp": int(p[4]),
+                "text": text,  # 已是正确的 utf-8 字符串，无需再转换
+            })
+        except (IndexError, ValueError):
+            fail_count += 1
+            continue
 
     if fail_count:
         # 个别弹幕解析失败不影响整体结果，降为 debug；
@@ -134,35 +127,36 @@ def parse_danmu(xml_text: str) -> list[dict]:
 
 
 def fetch_danmu(bv_id: str) -> list[dict]:
+    """
+    抓取视频第一个分 P 的弹幕。
+
+    异常:
+        BiliNotFoundError     视频不存在（获取 cid 时）
+        BiliRiskControlError  被风控
+        BiliRequestError      其他请求 / 解析失败
+    """
     logger.info("开始爬取弹幕...")
 
     cid = get_cid(bv_id)
-    if not cid:
-        return []
 
-    logger.debug(f"获取到 cid: {cid}")
+    # 和上一个请求之间留一点随机间隔
+    time.sleep(random.uniform(0.5, 1.5))
 
-    url = f"https://api.bilibili.com/x/v1/dm/list.so?oid={cid}"
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Referer": "https://www.bilibili.com/"
-    }
+    resp = bili_get(
+        DANMU_API,
+        params={"oid": cid},
+        headers={"Referer": f"https://www.bilibili.com/video/{bv_id}"},
+    )
 
-    try:
-        time.sleep(random.uniform(0.5, 1.5))
-        resp = requests.get(url, headers=headers)
+    # 关键修复：不依赖 requests 自动猜编码，强制按字节用 utf-8 解码
+    resp.encoding = "utf-8"
+    xml_text = resp.text
 
-        if resp.status_code != 200:
-            logger.warning(f"请求弹幕失败: HTTP {resp.status_code}")
-            return []
-
-        # 关键修复：不依赖 requests 自动猜编码，强制按字节用 utf-8 解码
-        resp.encoding = "utf-8"
-        xml_text = resp.text
-
-    except Exception as e:
-        logger.warning(f"请求弹幕失败: {e}")
-        return []
+    if not xml_text.lstrip().startswith("<"):
+        raise BiliRequestError(
+            f"弹幕接口返回的不是 XML（Content-Type: {resp.headers.get('Content-Type')}），"
+            f"开头: {xml_text[:100]!r}"
+        )
 
     danmus = parse_danmu(xml_text)
 

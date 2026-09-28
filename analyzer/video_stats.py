@@ -2,9 +2,6 @@
 analyzer/video_stats.py
 视频统计数据的保存、历史累积、趋势图生成
 
-修改时间：
-    2026-06-27
------------------------------
 路径结构调整：
     - 带时间戳的快照: data/analysis/{uname}/{title}/{bv_id}/{time_str}/stats_analysis.json
     - 跨次累积、每个视频只有一份的文件不带 time 这一层:

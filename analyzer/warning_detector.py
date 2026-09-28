@@ -2,9 +2,6 @@
 analyzer/warning_detector.py
 舆情预警检测
 
-修改时间：
-    2026-06-27
------------------------------
 路径结构调整：
     - 历史文件路径与 video_stats 对齐: data/analysis/{uname}/{title}/{bv_id}/history.json
     - 预警结果带时间目录: data/analysis/{uname}/{title}/{bv_id}/{time_str}/warnings.json

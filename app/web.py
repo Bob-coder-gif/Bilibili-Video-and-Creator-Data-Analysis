@@ -1,27 +1,10 @@
 # -*- coding: utf-8 -*-
-# ============================================================
-# ⚠️ 国内网络适配：必须放在本文件最顶部、所有 import 之前！
-# ------------------------------------------------------------
-# transformers / huggingface_hub 在被 import 时就会读取这些环境变量来决定
-# 用哪个下载源、是否离线。一旦它们被 import，再设就晚了。所以这几行必须是
-# 整个程序最早执行的代码——放在 docstring 和所有 import 之前。
-#
-# 作用：
-#   HF_ENDPOINT          -> 下载源换成国内镜像 hf-mirror.com（不用挂梯子）
-#   HF_HUB_OFFLINE=1     -> 优先用本地已下载的模型缓存，命中则完全不联网
-#   TRANSFORMERS_OFFLINE=1 -> 同上（transformers 侧的离线开关）
-#
-# 你的 BERT 模型和 BERTopic 的 embedding 模型都已缓存在本地
-# （C:\Users\你\.cache\huggingface\hub），所以离线模式可直接命中、秒加载。
-#
-# 万一以后换了新模型、本地没缓存：把下面 OFFLINE 两行的 "1" 改成 "0"，
-# 关梯子跑一次（会走国内镜像下载），下完再改回 "1"。
-# ============================================================
+
 import os as _os
 _os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 _os.environ["HF_HUB_OFFLINE"] = "1"
 _os.environ["TRANSFORMERS_OFFLINE"] = "1"
-# ============================================================
+
 
 """
 app/web.py
@@ -45,18 +28,9 @@ import logging
 from pathlib import Path
 
 from flask import Flask, request, jsonify, send_file, abort
-
-# 关键：在 import 任何项目模块（task_runner / pipeline 等）之前，先初始化日志。
-# 这些模块在 import 时就会调 get_logger()，谁先触发谁就定下日志配置；
-# 所以必须抢在它们之前 setup_logging()，否则后台线程里的 logger.info
-# （“开始爬取评论”等）可能因初始化时机不对而打不到终端。
 from utils.log_utils import setup_logging, log_event
 logger = setup_logging()
 
-# 过滤 werkzeug 的「请求日志」噪音，但保留启动横幅（Running on / Press CTRL+C 等）。
-# 不能简单 setLevel(WARNING)——那会把启动横幅也一起压掉。
-# 这里用一个过滤器：只丢弃形如  "GET /api/task/... 200"  的逐条请求日志，
-# 其它（启动信息、报错）全部放行。
 class _DropRequestLog(logging.Filter):
     def filter(self, record):
         msg = record.getMessage()

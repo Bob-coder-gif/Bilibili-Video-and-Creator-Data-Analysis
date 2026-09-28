@@ -37,6 +37,20 @@ bili-comment-renderer-> 评论渲染
          降低被 B 站限流的概率。
     这些改动不影响命令行单独跑，也不改变评论数据本身的结构。
 ============================================
+修改时间：
+    2026-09-28（降低风控风险）
+--------------------------------------------
+修改内容（解决"评论抓完后获取视频信息报 412"的问题）：
+      1. 页面加载完成后，顺手从 window.__INITIAL_STATE__.videoData 读取视频信息
+         并缓存给 get_video_info 使用，省掉一次单独的 view 接口请求。
+      2. 回复抓取的间隔从固定 0.1s 改为随机 _REPLY_DELAY 秒。原来几百个回复请求
+         在短时间内连续发出，是触发 IP 风控的主要原因。
+      3. 回复请求遇到 HTTP 412 或风控业务码时立即停止抓取剩余回复，
+         已抓到的数据保留，避免风控期间继续请求把封禁时间拉长。
+      4. 修复：max_count > 0 时对 dict 做切片会报 TypeError。
+      5. 修复：回复的 root 不在 comments 中（如主评论文本为空未收录）时
+         会 KeyError，导致该条回复所在批次剩余回复全部丢失。
+============================================
 """
 
 from playwright.sync_api import sync_playwright
@@ -45,6 +59,7 @@ import os
 import time
 import config.config as cfg
 from crawler.bilibili_state import save_login_state, launch_browser
+from crawler.get_info_from_browser import cache_video_data, JS_READ_VIDEO_DATA
 from utils.log_utils import get_logger, log_event
 
 logger = get_logger()
@@ -57,6 +72,12 @@ REPLAY_SIGNATURE = "replies"
 
 # 抓回复时，每处理多少个就汇报一次进度
 _REPLY_REPORT_EVERY = 20
+
+# 两次回复请求之间的随机间隔（秒）。调小会更快，但更容易触发风控
+_REPLY_DELAY = (0.5, 1.2)
+
+# 风控相关业务码
+_RISK_CODES = {-412, -352}
 
 # 整页重试次数：滚动若干轮仍 0 条评论且没发现评论 API 时，重新加载页面重试
 _MAX_PAGE_RETRY = 2
@@ -73,7 +94,7 @@ def _report(progress, stage, message="", **extra):
         progress(stage, message, **extra)
 
 
-def fetch_comments(bv_id: str, max_count: int = 0, progress=None) -> list[dict]:
+def fetch_comments(bv_id: str, max_count: int = 0, progress=None) -> dict:
     """
     抓取指定BV号视频的评论。
 
@@ -180,6 +201,13 @@ def fetch_comments(bv_id: str, max_count: int = 0, progress=None) -> list[dict]:
                 wait_until="domcontentloaded",
             )
 
+            # 顺手读取页面里的视频信息，缓存给 get_video_info，省一次 view 接口请求
+            try:
+                if cache_video_data(bv_id, page.evaluate(JS_READ_VIDEO_DATA)):
+                    logger.debug("已从页面缓存视频信息")
+            except Exception as e:
+                logger.debug(f"读取页面视频信息失败（不影响评论抓取）: {e}")
+
             # 1) 先等网络基本空闲，给页面异步资源加载留时间（连续跑时尤其重要）
             try:
                 page.wait_for_load_state("networkidle", timeout=8000)
@@ -265,21 +293,38 @@ def fetch_comments(bv_id: str, max_count: int = 0, progress=None) -> list[dict]:
 
         reply_fail_count = 0
         reply_collected = 0
+        reply_aborted = False   # 是否因风控提前停止
 
         for idx, url in enumerate(replies_to_fetch):
             try:
                 resp = context.request.get(url)
+
+                if resp.status == 412:
+                    reply_aborted = True
+                    logger.warning(f"抓取回复触发风控（HTTP 412），停止抓取剩余 "
+                                   f"{total_replies_urls - idx} 个评论的回复")
+                    break
+
                 if resp.status == 200:
                     r_data = resp.json()
-                    r_replies = (r_data.get("data") or {}).get("replies", [])
+
+                    if r_data.get("code") in _RISK_CODES:
+                        reply_aborted = True
+                        logger.warning(f"抓取回复触发风控（业务码 {r_data.get('code')}），"
+                                       f"停止抓取剩余回复")
+                        break
+
+                    r_replies = (r_data.get("data") or {}).get("replies") or []
                     for r_item in r_replies:
                         r_text = r_item.get("content", {}).get("message", "").strip()
                         r_like = r_item.get("like", 0)
                         r_mid = r_item.get("mid", "")
                         r_name = r_item.get("member", {}).get("uname", "")
                         r_root = r_item.get("root", "")
-                        if r_text:
-                            comments[r_root]["replies"].append({
+
+                        root_comment = comments.get(r_root)
+                        if r_text and root_comment is not None:
+                            root_comment["replies"].append({
                                 "type": "reply",
                                 "mid": r_mid,
                                 "text": r_text,
@@ -303,7 +348,7 @@ def fetch_comments(bv_id: str, max_count: int = 0, progress=None) -> list[dict]:
                         reply_done=idx + 1, reply_total=total_replies_urls,
                         reply_collected=reply_collected)
 
-            time.sleep(0.1)
+            time.sleep(random.uniform(*_REPLY_DELAY))
 
         if reply_fail_count:
             logger.warning(f"{reply_fail_count} 个回复请求失败，详情见 debug 日志")
@@ -315,7 +360,11 @@ def fetch_comments(bv_id: str, max_count: int = 0, progress=None) -> list[dict]:
     logger.debug(f"任务间隔等待 {delay:.1f}s")
     time.sleep(delay)
 
-    result = comments if max_count == 0 else comments[:max_count]
+    if max_count > 0:
+        result = dict(list(comments.items())[:max_count])
+    else:
+        result = comments
+
     logger.info(f"抓取完成，共收集 {len(result)} 条评论，{reply_collected} 条回复")
     log_event(
         "fetch_comments_done",
@@ -323,5 +372,6 @@ def fetch_comments(bv_id: str, max_count: int = 0, progress=None) -> list[dict]:
         comment_count=len(result),
         reply_count=reply_collected,
         reply_fail_count=reply_fail_count,
+        reply_aborted=reply_aborted,
     )
     return result

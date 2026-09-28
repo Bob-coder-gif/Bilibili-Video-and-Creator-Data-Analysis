@@ -5,8 +5,8 @@ bilibili_state.py
     2026-4-26
 
 功能：
-    1. 首次运行：打开浏览器让用户手动登录，保存Cookie
-        （从fetch_comment.py中提取出来，单独成文件，方便维护）。
+    首次运行：打开浏览器让用户手动登录，保存Cookie
+    （从fetch_comment.py中提取出来，单独成文件，方便维护）。
 
 修改时间：
     2026-06-21
@@ -32,54 +32,7 @@ import config.config as cfg
 
 logger = get_logger()
 
-# 兼容旧代码：变量名保持 STORAGE_PATH，只是来源换成了 config，方便统一管理
 STORAGE_PATH = cfg.STORAGE_PATH
-
-
-# def launch_browser(p, headless: bool = None):
-#     """
-#     按 config.BROWSER_ENGINE 启动浏览器，失败时自动尝试 config.BROWSER_FALLBACK_ENGINE。
-
-#     新增函数，供 bilibili_state.py / fetch_comments.py 共用，
-#     避免每个文件各写一份 p.chromium.launch(...)。
-
-#     参数：
-#         p        : sync_playwright() 上下文里的 playwright 实例
-#         headless : 不传则用 config.HEADLESS
-#     """
-#     if headless is None:
-#         headless = cfg.HEADLESS
-
-#     engine_name = getattr(cfg, "BROWSER_ENGINE", "chromium")
-#     fallback_name = getattr(cfg, "BROWSER_FALLBACK_ENGINE", None)
-
-#     engines = {
-#         "chromium": p.chromium,
-#         "firefox": p.firefox,
-#         "webkit": p.webkit,
-#     }
-
-#     primary = engines.get(engine_name, p.chromium)
-
-#     try:
-#         browser = primary.launch(headless=headless)
-#         logger.debug(f"浏览器启动成功：{engine_name}")
-#         return browser
-#     except Exception as e:
-#         logger.warning(f"主用浏览器引擎 [{engine_name}] 启动失败：{e}")
-
-#         if fallback_name and fallback_name != engine_name and fallback_name in engines:
-#             logger.info(f"尝试切换到备用浏览器引擎：{fallback_name}")
-#             try:
-#                 browser = engines[fallback_name].launch(headless=headless)
-#                 logger.info(f"备用浏览器引擎 [{fallback_name}] 启动成功")
-#                 return browser
-#             except Exception as e2:
-#                 logger.warning(f"备用浏览器引擎 [{fallback_name}] 也启动失败：{e2}")
-#                 raise
-#         else:
-#             raise
-
 
 def launch_browser(p, headless: bool = None):
     if headless is None:

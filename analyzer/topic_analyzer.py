@@ -2,14 +2,11 @@
 analyzer/topic_analyzer.py
 话题聚类分析 —— 基于 BERTopic
 
-修改时间：
-    2026-06-27
 -----------------------------
 路径结构调整：
     话题结果带时间目录: data/topic/{uname}/{title}/{bv_id}/{time_str}/topics.json
     save_topics / run_topic_analysis 新增可选参数 time_str。
 
-（BERTopic 为可选依赖、需要足够数据量等前提见下方各函数说明，未变）
 """
 
 from __future__ import annotations
